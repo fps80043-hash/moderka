@@ -104,6 +104,47 @@ async def get_role(user_id: int, chat_id: int = 0) -> int:
     return 0
 
 
+async def get_effective_role(user_id: int, chat_id: int) -> int:
+    """Роль с учётом Telegram-админки.
+
+    Если в БД роль 0, но пользователь является администратором/создателем чата,
+    даём базовую роль 1, чтобы команды модерации работали "из коробки".
+    """
+    role = await get_role(user_id, chat_id)
+    if role > 0:
+        return role
+    try:
+        m = await bot.get_chat_member(chat_id, user_id)
+        if m.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+            return 1
+    except Exception:
+        pass
+    return 0
+
+
+def get_actor_id(message: Message) -> Optional[int]:
+    """Вернуть user_id отправителя команды.
+
+    Если админ пишет анонимно (message.sender_chat), Telegram скрывает его user_id.
+    В таком режиме команды, завязанные на роли/права, нельзя корректно применять.
+    """
+    # Типовой случай: обычный пользователь
+    if message.from_user and not message.sender_chat:
+        return message.from_user.id
+
+    # Анонимный админ / пост от имени канала/чата
+    if message.sender_chat is not None:
+        # В некоторых клиентах from_user может быть GroupAnonymousBot
+        if message.from_user is None:
+            return None
+        if getattr(message.from_user, "is_bot", False) and (message.from_user.username or "") == "GroupAnonymousBot":
+            return None
+        # Если вдруг Telegram всё-таки прислал from_user вместе с sender_chat
+        return message.from_user.id
+
+    return message.from_user.id if message.from_user else None
+
+
 async def get_user_info(user_id: int) -> dict:
     """Получить инфо о пользователе через Telegram API"""
     try:
@@ -407,7 +448,15 @@ async def cmd_id(message: Message):
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
-        target = message.from_user.id
+        actor_id = get_actor_id(message)
+        if actor_id is None:
+            await message.reply(
+                "❗️Вы написали команду как <b>анонимный администратор</b>. "
+                "Укажите пользователя или ответьте на сообщение.",
+                parse_mode="HTML",
+            )
+            return
+        target = actor_id
     
     info = await get_user_info(target)
     text = f"🆔 <b>ID:</b> <code>{target}</code>\n"
@@ -424,7 +473,17 @@ async def cmd_stats(message: Message):
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
-        target = message.from_user.id
+        actor_id = get_actor_id(message)
+        if actor_id is None:
+            await message.reply(
+                "❗️Вы написали команду как <b>анонимный администратор</b> — Telegram скрывает ваш ID.\n\n"
+                "Чтобы получить статистику:\n"
+                "• ответьте на сообщение пользователя: <code>/stats</code>\n"
+                "• или укажите ID/username: <code>/stats @username</code>",
+                parse_mode="HTML",
+            )
+            return
+        target = actor_id
     
     chat_id = message.chat.id
     info = await get_user_info(target)
@@ -454,7 +513,8 @@ async def cmd_stats(message: Message):
         text += f"🚫 <b>Глобальный бан:</b> {gban.get('reason', '-')}\n"
     
     # Кнопки для модераторов
-    my_role = await get_role(message.from_user.id, chat_id)
+    actor_id = get_actor_id(message)
+    my_role = await get_effective_role(actor_id, chat_id) if actor_id else 0
     if my_role >= 1 and target != message.from_user.id:
         kb = InlineKeyboardBuilder()
         kb.button(text="📜 История варнов", callback_data=f"wh:{target}:{chat_id}")
@@ -468,34 +528,47 @@ async def cmd_stats(message: Message):
 @router.message(Command("mystatus"))
 async def cmd_mystatus(message: Message):
     """Мой статус"""
-    args = ["/stats", str(message.from_user.id)]
-    message.text = f"/stats {message.from_user.id}"
+    # Просто проксируем в /stats без аргументов.
+    # Если команда написана анонимным админом — /stats сам попросит указать цель.
+    message.text = "/stats"
     await cmd_stats(message)
 
 
 @router.message(Command("staff", "стафф", "команда"))
 async def cmd_staff(message: Message):
     """Состав команды"""
-    staff = await db.get_all_staff()
-    if not staff:
+    # По умолчанию показываем состав текущего чата + глобальный состав.
+    chat_staff = []
+    if message.chat.type != ChatType.PRIVATE:
+        chat_staff = await db.get_chat_staff(message.chat.id)
+    global_staff = await db.get_all_staff()
+
+    if not chat_staff and not global_staff:
         await message.answer("📋 Команда пуста")
         return
-    
+
+    def build_block(title: str, rows: List[dict]) -> str:
+        if not rows:
+            return f"<b>{title}</b>\n(пусто)\n\n"
+        by_role: dict[int, list] = {}
+        for s in rows:
+            r = int(s.get('role', 0))
+            by_role.setdefault(r, []).append(s)
+        out = f"<b>{title}</b>\n\n"
+        for role_num in sorted(by_role.keys(), reverse=True):
+            out += f"<b>{role_num:02d}. {ROLE_NAMES.get(role_num, '?')}</b>\n"
+            for s in by_role[role_num]:
+                uname = s.get('username')
+                uid = s.get('user_id')
+                out += f"   {'@' + uname if uname else 'ID: ' + str(uid)}\n"
+            out += "\n"
+        return out
+
     text = "👥 <b>Состав команды</b>\n\n"
-    by_role = {}
-    for s in staff:
-        r = s['role']
-        if r not in by_role:
-            by_role[r] = []
-        by_role[r].append(s)
-    
-    for role_num in sorted(by_role.keys(), reverse=True):
-        text += f"<b>{role_num:02d}. {ROLE_NAMES.get(role_num, '?')}</b>\n"
-        for s in by_role[role_num]:
-            uname = s.get('username')
-            text += f"   {'@' + uname if uname else 'ID: ' + str(s['user_id'])}\n"
-        text += "\n"
-    
+    if message.chat.type != ChatType.PRIVATE:
+        text += build_block("Чат", chat_staff)
+    text += build_block("Глобально", global_staff)
+
     await message.answer(text, parse_mode="HTML")
 
 
@@ -505,7 +578,15 @@ async def cmd_reg(message: Message):
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
-        target = message.from_user.id
+        actor_id = get_actor_id(message)
+        if actor_id is None:
+            await message.reply(
+                "❗️Вы написали команду как <b>анонимный администратор</b>. "
+                "Укажите пользователя или ответьте на сообщение.",
+                parse_mode="HTML",
+            )
+            return
+        target = actor_id
     
     # В Telegram нет API для даты регистрации, показываем просто ID
     await message.answer(
@@ -524,8 +605,17 @@ async def cmd_mute(message: Message):
     """Замутить пользователя"""
     if message.chat.type == ChatType.PRIVATE:
         return
+
+    actor_id = get_actor_id(message)
+    if actor_id is None:
+        await message.reply(
+            "❗️Команды модерации не работают в режиме <b>анонимного администратора</b>.\n"
+            "Отключите анонимность (Администраторы → Ваша роль → Анонимность) и попробуйте снова.",
+            parse_mode="HTML",
+        )
+        return
     
-    my_role = await get_role(message.from_user.id, message.chat.id)
+    my_role = await get_effective_role(actor_id, message.chat.id)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -572,7 +662,7 @@ async def cmd_mute(message: Message):
         await bot.restrict_chat_member(
             message.chat.id, target,
             permissions=ChatPermissions(can_send_messages=False),
-            until_date=timedelta(seconds=duration)
+            until_date=until
         )
     except TelegramBadRequest as e:
         await message.reply(f"❌ Ошибка: {e.message}")
@@ -581,7 +671,7 @@ async def cmd_mute(message: Message):
         await message.reply("❌ Нет прав бота!")
         return
     
-    await db.add_mute(target, message.chat.id, message.from_user.id, reason, until)
+    await db.add_mute(target, message.chat.id, actor_id, reason, until)
     
     kb = InlineKeyboardBuilder()
     kb.button(text="🔓 Снять мут", callback_data=f"unmute:{target}:{message.chat.id}")
@@ -592,7 +682,7 @@ async def cmd_mute(message: Message):
         f"<b>Кто:</b> {await mention(target, message.chat.id)}\n"
         f"<b>Время:</b> {format_time(duration)}\n"
         f"<b>Причина:</b> {reason}\n"
-        f"<b>Модератор:</b> {await mention(message.from_user.id)}",
+        f"<b>Модератор:</b> {await mention(actor_id)}",
         parse_mode="HTML",
         reply_markup=kb.as_markup()
     )
@@ -604,7 +694,15 @@ async def cmd_unmute(message: Message):
     if message.chat.type == ChatType.PRIVATE:
         return
     
-    my_role = await get_role(message.from_user.id, message.chat.id)
+    actor_id = get_actor_id(message)
+    if actor_id is None:
+        await message.reply(
+            "❗️Команды модерации не работают в режиме <b>анонимного администратора</b>.",
+            parse_mode="HTML",
+        )
+        return
+
+    my_role = await get_effective_role(actor_id, message.chat.id)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
