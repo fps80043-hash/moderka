@@ -1,16 +1,21 @@
 {
     "bot_token": "8310857029:AAFyoParxN3JA0vjGVWsqs7sGRSE22l8VpA",
-    "owner_id": 5027253935,
-    "owner_username": "Timo4ka115",
-    "moderated_groups": [
-        "https://t.me/+AchuiMAIKfY5Nzcy",
-        "https://t.me/TehDevGeorgAnonim",
-        "https://t.me/AnonimGeorgievka",
-        "https://t.me/+HEqfjxaceJE5Zjgy",
-        "https://t.me/+0MUF6Zc9VKYxZTAy",
-        "https://t.me/proverkabota12345678",
-        "https://t.me/+wpry_TIJDDwzZDYy",
-        "https://t.me/+P6szjBIptJRhMTQy",
-        "https://t.me/+QRsPNyNx2mpkY2Yy"
-    ]
+    
+    "moderated_chats": [
+        -1003724639162,
+        -1003839597579,
+        -1003596144519
+    ],
+    
+    "preset_staff": {
+        "Timo4ka115": 10,
+        "treshshshhh": 9,
+        "GashiSH40": 8,
+        "Wisnswiw": 7,
+        "ishakbest": 6
+    },
+    
+    "max_warns": 3,
+    "spam_interval_seconds": 2,
+    "spam_messages_count": 3
 }
