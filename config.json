@@ -1,19 +1,18 @@
 {
     "bot_token": "8310857029:AAFyoParxN3JA0vjGVWsqs7sGRSE22l8VpA",
-    
+
     "moderated_chats": [
-        -1001234567890,
-        -1009876543210
+        -1003724639162
     ],
-    
+
     "preset_staff": {
-        "Timo4ka115": 10,
-        "treshshshhh": 9,
-        "GashiSH40": 8,
-        "Wisnswiw": 7,
-        "ishakbest": 6
+        "123456789": {"role": 10, "username": "Timo4ka115"},
+        "987654321": {"role": 9, "username": "treshshshhh"},
+        "111222333": {"role": 8, "username": "GashiSH40"},
+        "444555666": {"role": 7, "username": "Wisnswiw"},
+        "777888999": {"role": 6, "username": "ishakbest"}
     },
-    
+
     "max_warns": 3,
     "spam_interval_seconds": 2,
     "spam_messages_count": 3
