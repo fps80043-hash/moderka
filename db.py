@@ -1,6 +1,6 @@
 """
-Database module - v2 для модерации Telegram
-Добавлено: pending_staff, get_username_by_id, apply_pending_staff
+Database module - v3 для модерации Telegram
+Добавлено: кэш причин варнов, улучшенные методы управления ролями
 """
 
 import aiosqlite
@@ -122,9 +122,19 @@ class Database:
                 role INTEGER DEFAULT 0
             );
 
+            -- Кэш причин варнов (для callback)
+            CREATE TABLE IF NOT EXISTS warn_reason_cache (
+                user_id INTEGER,
+                chat_id INTEGER,
+                reason TEXT,
+                cached_at INTEGER DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (user_id, chat_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_user_chat ON messages(user_id, chat_id);
             CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_at);
             CREATE INDEX IF NOT EXISTS idx_username_cache_uid ON username_cache(user_id);
+            CREATE INDEX IF NOT EXISTS idx_warn_cache_time ON warn_reason_cache(cached_at);
         """)
         await self.db.commit()
 
@@ -200,6 +210,11 @@ class Database:
     # PENDING STAFF (отложенные роли)
     # =========================================================================
 
+    async def init_pending_staff(self, staff_dict: dict):
+        """Инициализация отложенных ролей из конфига"""
+        for username, role in staff_dict.items():
+            await self.save_pending_staff(username, role)
+
     async def save_pending_staff(self, username: str, role: int):
         """Сохранить отложенную роль (username известен, user_id нет)"""
         username = username.lower().lstrip('@')
@@ -254,9 +269,11 @@ class Database:
         await self.db.execute("DELETE FROM global_roles WHERE user_id = ?", (user_id,))
         await self.db.commit()
 
-    async def get_all_staff(self) -> List[Dict]:
-        async with self.db.execute("SELECT * FROM global_roles WHERE role > 0 ORDER BY role DESC") as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    async def get_all_staff(self) -> List[Tuple[int, int]]:
+        """Получить всех сотрудников (user_id, role)"""
+        async with self.db.execute("SELECT user_id, role FROM global_roles WHERE role > 0 ORDER BY role DESC") as cur:
+            rows = await cur.fetchall()
+            return [(row['user_id'], row['role']) for row in rows]
 
     # =========================================================================
     # ЛОКАЛЬНЫЕ РОЛИ
@@ -301,17 +318,17 @@ class Database:
         await self.db.execute("DELETE FROM global_bans WHERE user_id = ?", (user_id,))
         await self.db.commit()
 
-    async def get_global_ban(self, user_id: int) -> Optional[Dict]:
+    async def is_globally_banned(self, user_id: int) -> bool:
+        async with self.db.execute("SELECT 1 FROM global_bans WHERE user_id = ?", (user_id,)) as cur:
+            return await cur.fetchone() is not None
+
+    async def get_global_ban_info(self, user_id: int) -> Optional[Dict]:
         async with self.db.execute("SELECT * FROM global_bans WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    async def get_global_bans(self) -> List[Dict]:
-        async with self.db.execute("SELECT * FROM global_bans ORDER BY banned_at DESC") as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
     # =========================================================================
-    # ЛОКАЛЬНЫЙ БАН
+    # БАНЫ
     # =========================================================================
 
     async def add_ban(self, user_id: int, chat_id: int, banned_by: int, reason: str):
@@ -326,18 +343,18 @@ class Database:
         await self.db.execute("DELETE FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
         await self.db.commit()
 
-    async def get_ban(self, user_id: int, chat_id: int) -> Optional[Dict]:
+    async def is_banned(self, user_id: int, chat_id: int) -> bool:
+        async with self.db.execute(
+            "SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def get_ban_info(self, user_id: int, chat_id: int) -> Optional[Dict]:
         async with self.db.execute(
             "SELECT * FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
-
-    async def get_bans(self, chat_id: int) -> List[Dict]:
-        async with self.db.execute(
-            "SELECT * FROM bans WHERE chat_id = ? ORDER BY banned_at DESC", (chat_id,)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
 
     # =========================================================================
     # МУТЫ
@@ -355,29 +372,37 @@ class Database:
         await self.db.execute("DELETE FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
         await self.db.commit()
 
-    async def get_mute(self, user_id: int, chat_id: int) -> Optional[Dict]:
+    async def is_muted(self, user_id: int, chat_id: int) -> bool:
+        now = int(time.time())
+        async with self.db.execute(
+            "SELECT until FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return False
+            until = row['until']
+            if until == 0:
+                return True
+            if until > now:
+                return True
+            # Мут истёк
+            await self.remove_mute(user_id, chat_id)
+            return False
+
+    async def get_mute_info(self, user_id: int, chat_id: int) -> Optional[Dict]:
         async with self.db.execute(
             "SELECT * FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    async def get_mutes(self, chat_id: int) -> List[Dict]:
-        now = int(time.time())
-        async with self.db.execute(
-            "SELECT * FROM mutes WHERE chat_id = ? AND until > ? ORDER BY until", (chat_id, now)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
     # =========================================================================
     # ВАРНЫ
     # =========================================================================
 
     async def add_warn(self, user_id: int, chat_id: int, warned_by: int, reason: str) -> int:
-        await self.db.execute(
-            "INSERT INTO warn_history (user_id, chat_id, warned_by, reason) VALUES (?, ?, ?, ?)",
-            (user_id, chat_id, warned_by, reason)
-        )
+        """Добавить варн, вернуть новое количество"""
+        # Получаем текущее количество
         async with self.db.execute(
             "SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
         ) as cur:
@@ -385,61 +410,102 @@ class Database:
             current = row['count'] if row else 0
 
         new_count = current + 1
+
+        # Обновляем таблицу warns
         await self.db.execute("""
             INSERT INTO warns (user_id, chat_id, count, warned_by, reason) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id, chat_id) DO UPDATE SET count = excluded.count,
                 warned_by = excluded.warned_by, reason = excluded.reason,
                 warned_at = strftime('%s', 'now')
         """, (user_id, chat_id, new_count, warned_by, reason))
+
+        # Добавляем в историю
+        await self.db.execute("""
+            INSERT INTO warn_history (user_id, chat_id, warned_by, reason) VALUES (?, ?, ?, ?)
+        """, (user_id, chat_id, warned_by, reason))
+
         await self.db.commit()
         return new_count
 
     async def remove_warn(self, user_id: int, chat_id: int) -> int:
+        """Снять варн, вернуть новое количество"""
         async with self.db.execute(
             "SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
         ) as cur:
             row = await cur.fetchone()
             current = row['count'] if row else 0
-        if current <= 1:
-            await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
-            await self.db.commit()
+
+        if current <= 0:
             return 0
-        await self.db.execute(
-            "UPDATE warns SET count = count - 1 WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        )
-        await self.db.commit()
-        return current - 1
 
-    async def clear_warns(self, user_id: int, chat_id: int):
-        await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
-        await self.db.commit()
+        new_count = current - 1
 
-    async def get_warns_count(self, user_id: int, chat_id: int) -> int:
+        if new_count == 0:
+            await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        else:
+            await self.db.execute("""
+                UPDATE warns SET count = ?, warned_at = strftime('%s', 'now')
+                WHERE user_id = ? AND chat_id = ?
+            """, (new_count, user_id, chat_id))
+
+        await self.db.commit()
+        return new_count
+
+    async def get_warns(self, user_id: int, chat_id: int) -> int:
         async with self.db.execute(
             "SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
         ) as cur:
             row = await cur.fetchone()
             return row['count'] if row else 0
 
-    async def get_warn_info(self, user_id: int, chat_id: int) -> Optional[Dict]:
+    async def clear_warns(self, user_id: int, chat_id: int):
+        await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        await self.db.commit()
+
+    async def get_warn_history(self, user_id: int, chat_id: int) -> List[Dict]:
         async with self.db.execute(
-            "SELECT * FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
+            "SELECT * FROM warn_history WHERE user_id = ? AND chat_id = ? ORDER BY warned_at DESC",
+            (user_id, chat_id)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    # =========================================================================
+    # КЭШ ПРИЧИН ВАРНОВ (для callback)
+    # =========================================================================
+
+    async def cache_warn_reason(self, user_id: int, chat_id: int, reason: str):
+        """Сохранить причину варна для последующего использования в callback"""
+        await self.db.execute("""
+            INSERT INTO warn_reason_cache (user_id, chat_id, reason) VALUES (?, ?, ?)
+            ON CONFLICT(user_id, chat_id) DO UPDATE SET reason = excluded.reason,
+                cached_at = strftime('%s', 'now')
+        """, (user_id, chat_id, reason))
+        await self.db.commit()
+
+    async def get_cached_warn_reason(self, user_id: int, chat_id: int) -> Optional[str]:
+        """Получить сохраненную причину варна"""
+        async with self.db.execute(
+            "SELECT reason FROM warn_reason_cache WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
         ) as cur:
             row = await cur.fetchone()
-            return dict(row) if row else None
+            return row['reason'] if row else None
 
-    async def get_warn_history(self, user_id: int, chat_id: int, limit: int = 10) -> List[Dict]:
-        async with self.db.execute(
-            "SELECT * FROM warn_history WHERE user_id = ? AND chat_id = ? ORDER BY warned_at DESC LIMIT ?",
-            (user_id, chat_id, limit)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    async def clear_cached_warn_reason(self, user_id: int, chat_id: int):
+        """Очистить кэш причины варна"""
+        await self.db.execute(
+            "DELETE FROM warn_reason_cache WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        )
+        await self.db.commit()
 
-    async def get_warns_list(self, chat_id: int) -> List[Dict]:
-        async with self.db.execute(
-            "SELECT * FROM warns WHERE chat_id = ? AND count > 0 ORDER BY count DESC", (chat_id,)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    async def cleanup_old_warn_cache(self, max_age_seconds: int = 3600):
+        """Очистить старые записи кэша (старше max_age_seconds)"""
+        cutoff = int(time.time()) - max_age_seconds
+        await self.db.execute(
+            "DELETE FROM warn_reason_cache WHERE cached_at < ?", (cutoff,)
+        )
+        await self.db.commit()
 
     # =========================================================================
     # НИКИ
@@ -452,10 +518,6 @@ class Database:
         """, (user_id, chat_id, nick))
         await self.db.commit()
 
-    async def remove_nick(self, user_id: int, chat_id: int):
-        await self.db.execute("DELETE FROM nicks WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
-        await self.db.commit()
-
     async def get_nick(self, user_id: int, chat_id: int) -> Optional[str]:
         async with self.db.execute(
             "SELECT nick FROM nicks WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
@@ -463,36 +525,16 @@ class Database:
             row = await cur.fetchone()
             return row['nick'] if row else None
 
+    async def remove_nick(self, user_id: int, chat_id: int):
+        await self.db.execute("DELETE FROM nicks WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        await self.db.commit()
+
     async def get_user_by_nick(self, nick: str, chat_id: int) -> Optional[int]:
         async with self.db.execute(
             "SELECT user_id FROM nicks WHERE nick = ? COLLATE NOCASE AND chat_id = ?", (nick, chat_id)
         ) as cur:
             row = await cur.fetchone()
             return row['user_id'] if row else None
-
-    async def get_nicks(self, chat_id: int) -> List[Dict]:
-        async with self.db.execute("SELECT * FROM nicks WHERE chat_id = ?", (chat_id,)) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
-    async def clear_all_nicks(self, chat_id: int):
-        await self.db.execute("DELETE FROM nicks WHERE chat_id = ?", (chat_id,))
-        await self.db.commit()
-
-    # =========================================================================
-    # ЗАПРЕЩЁННЫЕ СЛОВА
-    # =========================================================================
-
-    async def add_banword(self, chat_id: int, word: str):
-        await self.db.execute("INSERT OR IGNORE INTO banwords (chat_id, word) VALUES (?, ?)", (chat_id, word.lower()))
-        await self.db.commit()
-
-    async def remove_banword(self, chat_id: int, word: str):
-        await self.db.execute("DELETE FROM banwords WHERE chat_id = ? AND word = ? COLLATE NOCASE", (chat_id, word.lower()))
-        await self.db.commit()
-
-    async def get_banwords(self, chat_id: int) -> List[str]:
-        async with self.db.execute("SELECT word FROM banwords WHERE chat_id = ?", (chat_id,)) as cur:
-            return [r['word'] for r in await cur.fetchall()]
 
     # =========================================================================
     # НАСТРОЙКИ ЧАТА
@@ -507,88 +549,92 @@ class Database:
             row = await cur.fetchone()
             return row['welcome_text'] if row and row['welcome_text'] else None
 
-    async def toggle_silence(self, chat_id: int) -> bool:
-        chat = await self.get_chat(chat_id)
-        new_val = 0 if chat and chat.get('silence') else 1
-        await self.db.execute("UPDATE chats SET silence = ? WHERE chat_id = ?", (new_val, chat_id))
+    async def set_silence(self, chat_id: int, enabled: bool):
+        await self.db.execute("UPDATE chats SET silence = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
         await self.db.commit()
-        return bool(new_val)
 
     async def is_silence(self, chat_id: int) -> bool:
-        chat = await self.get_chat(chat_id)
-        return bool(chat and chat.get('silence'))
+        async with self.db.execute("SELECT silence FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row['silence']) if row else False
 
-    async def toggle_antiflood(self, chat_id: int) -> bool:
-        chat = await self.get_chat(chat_id)
-        new_val = 0 if chat and chat.get('antiflood') else 1
-        await self.db.execute("UPDATE chats SET antiflood = ? WHERE chat_id = ?", (new_val, chat_id))
+    async def set_antiflood(self, chat_id: int, enabled: bool):
+        await self.db.execute("UPDATE chats SET antiflood = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
         await self.db.commit()
-        return bool(new_val)
 
     async def is_antiflood(self, chat_id: int) -> bool:
-        chat = await self.get_chat(chat_id)
-        return bool(chat and chat.get('antiflood'))
+        async with self.db.execute("SELECT antiflood FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row['antiflood']) if row else False
 
-    async def toggle_filter(self, chat_id: int) -> bool:
-        chat = await self.get_chat(chat_id)
-        new_val = 0 if chat and chat.get('filter') else 1
-        await self.db.execute("UPDATE chats SET filter = ? WHERE chat_id = ?", (new_val, chat_id))
+    async def set_filter(self, chat_id: int, enabled: bool):
+        await self.db.execute("UPDATE chats SET filter = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
         await self.db.commit()
-        return bool(new_val)
 
     async def is_filter(self, chat_id: int) -> bool:
-        chat = await self.get_chat(chat_id)
-        return bool(chat and chat.get('filter'))
+        async with self.db.execute("SELECT filter FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row['filter']) if row else False
 
     # =========================================================================
-    # СООБЩЕНИЯ
+    # BANWORDS
     # =========================================================================
 
-    async def add_message(self, user_id: int, chat_id: int, message_id: int):
+    async def add_banword(self, chat_id: int, word: str):
+        word = word.lower()
+        await self.db.execute("""
+            INSERT OR IGNORE INTO banwords (chat_id, word) VALUES (?, ?)
+        """, (chat_id, word))
+        await self.db.commit()
+
+    async def remove_banword(self, chat_id: int, word: str):
+        word = word.lower()
+        await self.db.execute("DELETE FROM banwords WHERE chat_id = ? AND word = ?", (chat_id, word))
+        await self.db.commit()
+
+    async def get_banwords(self, chat_id: int) -> List[str]:
+        async with self.db.execute("SELECT word FROM banwords WHERE chat_id = ?", (chat_id,)) as cur:
+            return [row['word'] for row in await cur.fetchall()]
+
+    # =========================================================================
+    # СПАМ (ANTIFLOOD)
+    # =========================================================================
+
+    async def check_spam(self, user_id: int, chat_id: int, now: float) -> int:
+        """Проверить и обновить счётчик спама"""
+        # Удаляем старые сообщения (старше SPAM_INTERVAL)
+        cutoff = now - 2  # SPAM_INTERVAL по умолчанию
         await self.db.execute(
-            "INSERT INTO messages (user_id, chat_id, message_id) VALUES (?, ?, ?)",
-            (user_id, chat_id, message_id)
+            "DELETE FROM messages WHERE user_id = ? AND chat_id = ? AND sent_at < ?",
+            (user_id, chat_id, int(cutoff))
+        )
+        
+        # Добавляем новое сообщение
+        await self.db.execute(
+            "INSERT INTO messages (user_id, chat_id, message_id, sent_at) VALUES (?, ?, ?, ?)",
+            (user_id, chat_id, 0, int(now))
+        )
+        
+        # Считаем сообщения за последние SPAM_INTERVAL секунд
+        async with self.db.execute(
+            "SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND chat_id = ? AND sent_at >= ?",
+            (user_id, chat_id, int(cutoff))
+        ) as cur:
+            row = await cur.fetchone()
+            count = row['cnt'] if row else 0
+        
+        await self.db.commit()
+        return count
+
+    async def clear_spam(self, user_id: int, chat_id: int):
+        """Очистить счётчик спама"""
+        await self.db.execute(
+            "DELETE FROM messages WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
         )
         await self.db.commit()
 
-    async def get_message_count(self, user_id: int, chat_id: int) -> int:
-        async with self.db.execute(
-            "SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
-            row = await cur.fetchone()
-            return row['cnt'] if row else 0
-
-    async def get_last_messages(self, user_id: int, chat_id: int, count: int = 3) -> List[Dict]:
-        async with self.db.execute(
-            "SELECT * FROM messages WHERE user_id = ? AND chat_id = ? ORDER BY sent_at DESC LIMIT ?",
-            (user_id, chat_id, count)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
-    async def check_spam(self, user_id: int, chat_id: int, interval: int = 2, count: int = 3) -> bool:
-        msgs = await self.get_last_messages(user_id, chat_id, count)
-        if len(msgs) < count:
-            return False
-        return (msgs[0]['sent_at'] - msgs[-1]['sent_at']) < interval
-
-    async def get_user_messages(self, user_id: int, chat_id: int, limit: int = 100) -> List[int]:
-        async with self.db.execute(
-            "SELECT message_id FROM messages WHERE user_id = ? AND chat_id = ? ORDER BY sent_at DESC LIMIT ?",
-            (user_id, chat_id, limit)
-        ) as cur:
-            return [r['message_id'] for r in await cur.fetchall()]
-
-    async def clear_user_messages(self, user_id: int, chat_id: int):
-        await self.db.execute("DELETE FROM messages WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+    async def cleanup_old_messages(self, max_age_seconds: int = 3600):
+        """Очистить старые записи сообщений"""
+        cutoff = int(time.time()) - max_age_seconds
+        await self.db.execute("DELETE FROM messages WHERE sent_at < ?", (cutoff,))
         await self.db.commit()
-
-    async def get_top_users(self, chat_id: int, limit: int = 10) -> List[Tuple[int, int]]:
-        async with self.db.execute(
-            "SELECT user_id, COUNT(*) as cnt FROM messages WHERE chat_id = ? GROUP BY user_id ORDER BY cnt DESC LIMIT ?",
-            (chat_id, limit)
-        ) as cur:
-            return [(r['user_id'], r['cnt']) for r in await cur.fetchall()]
-
-    async def close(self):
-        if self.db:
-            await self.db.close()
