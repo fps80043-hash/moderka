@@ -20,7 +20,7 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, List
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER
@@ -115,7 +115,7 @@ async def get_user_info(user_id: int) -> dict:
             "username": user.username or "",
             "full_name": user.full_name or f"User {user_id}"
         }
-    except Exception:
+    except:
         return {
             "id": user_id,
             "first_name": "Пользователь",
@@ -179,7 +179,7 @@ async def parse_user(message: Message, args: list, start_idx: int = 1) -> Option
             user = await bot.get_chat(f"@{username}")
             await db.cache_username(user.id, username)
             return user.id
-        except Exception:
+        except:
             return None
     
     # Ник в чате
@@ -206,22 +206,19 @@ def parse_time(s: str) -> Optional[int]:
         if s.endswith(suffix):
             try:
                 return int(s[:-1]) * m
-            except Exception:
+            except:
                 return None
     try:
         return int(s) * 60  # По умолчанию минуты
-    except Exception:
+    except:
         return None
 
 
 def format_time(sec: int) -> str:
     """Форматирование секунд"""
-    if sec < 60:
-        return f"{sec}с"
-    if sec < 3600:
-        return f"{sec // 60}м"
-    if sec < 86400:
-        return f"{sec // 3600}ч"
+    if sec < 60: return f"{sec}с"
+    if sec < 3600: return f"{sec // 60}м"
+    if sec < 86400: return f"{sec // 3600}ч"
     return f"{sec // 86400}д"
 
 
@@ -285,7 +282,7 @@ async def on_user_join(event: ChatMemberUpdated):
                 f"<b>Причина:</b> {ban.get('reason', '-')}",
                 parse_mode="HTML"
             )
-        except Exception:
+        except:
             pass
         return
     
@@ -299,7 +296,7 @@ async def on_user_join(event: ChatMemberUpdated):
         welcome = welcome.replace("%username%", f"@{user.username}" if user.username else user.full_name)
         try:
             await bot.send_message(chat_id, welcome, parse_mode="HTML")
-        except Exception:
+        except:
             pass
 
 
@@ -471,6 +468,7 @@ async def cmd_stats(message: Message):
 @router.message(Command("mystatus"))
 async def cmd_mystatus(message: Message):
     """Мой статус"""
+    args = ["/stats", str(message.from_user.id)]
     message.text = f"/stats {message.from_user.id}"
     await cmd_stats(message)
 
@@ -1303,7 +1301,7 @@ async def cmd_gban(message: Message):
         try:
             await bot.ban_chat_member(chat['chat_id'], target)
             banned_count += 1
-        except Exception:
+        except:
             pass
     
     await message.answer(
@@ -1338,7 +1336,7 @@ async def cmd_gunban(message: Message):
     for chat in chats:
         try:
             await bot.unban_chat_member(chat['chat_id'], target, only_if_banned=True)
-        except Exception:
+        except:
             pass
     
     await message.answer(f"✅ Глобальный бан снят: {await mention(target)}", parse_mode="HTML")
@@ -1383,7 +1381,7 @@ async def cmd_del(message: Message):
     try:
         await message.reply_to_message.delete()
         await message.delete()
-    except Exception:
+    except:
         await message.reply("❌ Не удалось удалить")
 
 
@@ -1412,7 +1410,7 @@ async def cmd_clear(message: Message):
         try:
             await bot.delete_message(message.chat.id, msg_id)
             deleted += 1
-        except Exception:
+        except:
             pass
     
     await db.clear_user_messages(target, message.chat.id)
@@ -1435,7 +1433,7 @@ async def cb_clear(call: CallbackQuery):
         try:
             await bot.delete_message(chat_id, msg_id)
             deleted += 1
-        except Exception:
+        except:
             pass
     
     await db.clear_user_messages(target, chat_id)
@@ -1469,7 +1467,7 @@ async def cmd_setrole(message: Message):
     
     try:
         new_role = int(args[role_idx])
-    except Exception:
+    except:
         await message.reply("❌ Роль должна быть числом!")
         return
     
@@ -1587,7 +1585,7 @@ async def cmd_addstaff(message: Message):
     username = args[1].lstrip("@")
     try:
         new_role = int(args[2])
-    except Exception:
+    except:
         await message.reply("❌ Роль должна быть числом!")
         return
     
@@ -1598,7 +1596,7 @@ async def cmd_addstaff(message: Message):
     try:
         user = await bot.get_chat(f"@{username}")
         target_id = user.id
-    except Exception:
+    except:
         await message.reply(f"❌ Пользователь @{username} не найден")
         return
     
@@ -1629,8 +1627,8 @@ async def cmd_removestaff(message: Message):
     try:
         user = await bot.get_chat(f"@{username}")
         target_id = user.id
-    except Exception:
-        await message.reply("❌ Пользователь не найден")
+    except:
+        await message.reply(f"❌ Пользователь не найден")
         return
     
     target_role = await db.get_global_role(target_id)
@@ -1705,14 +1703,18 @@ async def cmd_antiflood(message: Message):
     
     enabled = await db.toggle_antiflood(message.chat.id)
     if enabled:
-        await message.answer("🛡 Антифлуд <b>включён</b>\nСпамеры будут автоматически замучены", parse_mode="HTML")
+        await message.answer(
+            f"🛡 Антифлуд <b>включён</b>\n"
+            f"При {SPAM_COUNT} сообщениях за {SPAM_INTERVAL} сек — автомут",
+            parse_mode="HTML"
+        )
     else:
         await message.answer("🛡 Антифлуд <b>выключен</b>", parse_mode="HTML")
 
 
 @router.message(Command("filter", "фильтр"))
 async def cmd_filter(message: Message):
-    """Фильтр слов"""
+    """Фильтр запрещённых слов"""
     my_role = await get_role(message.from_user.id, message.chat.id)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
@@ -1816,30 +1818,10 @@ async def cmd_broadcast(message: Message):
         try:
             await bot.send_message(chat['chat_id'], f"📢 <b>Объявление</b>\n\n{text}", parse_mode="HTML")
             sent += 1
-        except Exception:
+        except:
             pass
     
     await message.answer(f"✅ Отправлено в {sent} чатов")
-
-
-# =============================================================================
-# ТОП ПОЛЬЗОВАТЕЛЕЙ
-# =============================================================================
-
-@router.message(Command("top", "топ"))
-async def cmd_top(message: Message):
-    """Топ по сообщениям"""
-    top_users = await db.get_top_users(message.chat.id, 10)
-    if not top_users:
-        await message.answer("📋 Нет данных о сообщениях")
-        return
-    
-    text = "🏆 <b>Топ по сообщениям</b>\n\n"
-    for i, (user_id, count) in enumerate(top_users, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        text += f"{medal} {await mention(user_id, message.chat.id)} — {count} сообщений\n"
-    
-    await message.answer(text, parse_mode="HTML")
 
 
 # =============================================================================
@@ -1873,7 +1855,7 @@ async def on_message(message: Message):
     if await db.is_silence(chat_id) and role < 1:
         try:
             await message.delete()
-        except Exception:
+        except:
             pass
         return
     
@@ -1882,7 +1864,7 @@ async def on_message(message: Message):
     if mute and mute.get('until', 0) > time.time():
         try:
             await message.delete()
-        except Exception:
+        except:
             pass
         return
     
@@ -1903,7 +1885,7 @@ async def on_message(message: Message):
                     f"🔇 {await mention(user_id)} получил мут на 30 мин за спам",
                     parse_mode="HTML"
                 )
-            except Exception:
+            except:
                 pass
             return
     
@@ -1927,7 +1909,7 @@ async def on_message(message: Message):
                         f"🔇 {await mention(user_id)} получил мут на 30 мин за запрещённое слово",
                         parse_mode="HTML"
                     )
-                except Exception:
+                except:
                     pass
                 return
 

@@ -1,5 +1,5 @@
 """
-Database module - полная версия для модерации Telegram
+Database module - полная версия для модерации
 """
 
 import aiosqlite
@@ -172,11 +172,6 @@ class Database:
         ) as cursor:
             return await cursor.fetchone() is not None
     
-    async def remove_chat(self, chat_id: int):
-        """Удалить чат из базы"""
-        await self.db.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
-        await self.db.commit()
-    
     # =========================================================================
     # КЭШИРОВАНИЕ USERNAME
     # =========================================================================
@@ -239,8 +234,8 @@ class Database:
         ) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
     
-    async def get_all_staff_with_chat(self, chat_id: int) -> List[Tuple[int, int]]:
-        """Получить команду для конкретного чата (user_id, role)"""
+    async def get_all_staff_in_chat(self, chat_id: int) -> List[Tuple[int, int]]:
+        """Получить всю команду в конкретном чате (user_id, role)"""
         result = []
         # Глобальные роли
         async with self.db.execute(
@@ -249,17 +244,18 @@ class Database:
             for row in await cursor.fetchall():
                 result.append((row['user_id'], row['role']))
         
-        # Локальные роли чата
+        # Локальные роли
         async with self.db.execute(
             "SELECT user_id, role FROM user_roles WHERE chat_id = ? AND role > 0",
             (chat_id,)
         ) as cursor:
             for row in await cursor.fetchall():
-                # Не дублируем, если уже есть глобальная роль
-                if not any(r[0] == row['user_id'] for r in result):
+                # Если уже есть глобальная роль - пропускаем
+                existing_ids = [r[0] for r in result]
+                if row['user_id'] not in existing_ids:
                     result.append((row['user_id'], row['role']))
         
-        return sorted(result, key=lambda x: x[1], reverse=True)
+        return result
     
     # =========================================================================
     # ЛОКАЛЬНЫЕ РОЛИ
@@ -331,13 +327,6 @@ class Database:
         ) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
     
-    async def is_global_banned(self, user_id: int) -> bool:
-        """Проверить глобальный бан"""
-        async with self.db.execute(
-            "SELECT 1 FROM global_bans WHERE user_id = ?", (user_id,)
-        ) as cursor:
-            return await cursor.fetchone() is not None
-    
     # =========================================================================
     # ЛОКАЛЬНЫЙ БАН
     # =========================================================================
@@ -377,14 +366,6 @@ class Database:
             (chat_id,)
         ) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
-    
-    async def is_banned(self, user_id: int, chat_id: int) -> bool:
-        """Проверить локальный бан"""
-        async with self.db.execute(
-            "SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?",
-            (user_id, chat_id)
-        ) as cursor:
-            return await cursor.fetchone() is not None
     
     # =========================================================================
     # МУТЫ
@@ -436,15 +417,6 @@ class Database:
             (chat_id, now)
         )
         await self.db.commit()
-    
-    async def is_muted(self, user_id: int, chat_id: int) -> bool:
-        """Проверить мут"""
-        now = int(time.time())
-        async with self.db.execute(
-            "SELECT 1 FROM mutes WHERE user_id = ? AND chat_id = ? AND until > ?",
-            (user_id, chat_id, now)
-        ) as cursor:
-            return await cursor.fetchone() is not None
     
     # =========================================================================
     # ПРЕДУПРЕЖДЕНИЯ
@@ -576,7 +548,7 @@ class Database:
     async def get_user_by_nick(self, nick: str, chat_id: int) -> Optional[int]:
         """Найти пользователя по нику"""
         async with self.db.execute(
-            "SELECT user_id FROM nicks WHERE nick = ? COLLATE NOCASE AND chat_id = ?",
+            "SELECT user_id FROM nicks WHERE nick = ? AND chat_id = ? COLLATE NOCASE",
             (nick, chat_id)
         ) as cursor:
             row = await cursor.fetchone()
@@ -619,11 +591,6 @@ class Database:
             "SELECT word FROM banwords WHERE chat_id = ?", (chat_id,)
         ) as cursor:
             return [row['word'] for row in await cursor.fetchall()]
-    
-    async def clear_banwords(self, chat_id: int):
-        """Очистить все запрещённые слова"""
-        await self.db.execute("DELETE FROM banwords WHERE chat_id = ?", (chat_id,))
-        await self.db.commit()
     
     # =========================================================================
     # НАСТРОЙКИ ЧАТА
@@ -743,23 +710,6 @@ class Database:
         await self.db.execute(
             "DELETE FROM messages WHERE user_id = ? AND chat_id = ?",
             (user_id, chat_id)
-        )
-        await self.db.commit()
-    
-    async def get_top_users(self, chat_id: int, limit: int = 10) -> List[Tuple[int, int]]:
-        """Получить топ пользователей по сообщениям"""
-        async with self.db.execute(
-            """SELECT user_id, COUNT(*) as cnt FROM messages 
-               WHERE chat_id = ? GROUP BY user_id ORDER BY cnt DESC LIMIT ?""",
-            (chat_id, limit)
-        ) as cursor:
-            return [(row['user_id'], row['cnt']) for row in await cursor.fetchall()]
-    
-    async def cleanup_old_messages(self, days: int = 30):
-        """Удалить старые записи сообщений"""
-        cutoff = int(time.time()) - (days * 86400)
-        await self.db.execute(
-            "DELETE FROM messages WHERE sent_at < ?", (cutoff,)
         )
         await self.db.commit()
     
