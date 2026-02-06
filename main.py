@@ -1,15 +1,13 @@
 """
 🔵 Модерация Анонимные сообщения | Георгиевка
-Telegram бот для модерации групп - ИСПРАВЛЕННАЯ ВЕРСИЯ
+Telegram бот для модерации групп - ВЕРСИЯ 2 (ПОЛНЫЙ ФИКС)
 
-Ключевые исправления:
-- preset_staff по user_id (не username)
-- Поддержка анонимных сообщений (GroupAnonymousBot)
-- Исправлен parse_user для надёжного поиска участников
-- Исправлены ChatPermissions (новый API)
-- Все 11 ролей (0-10) работают корректно
-- Проверка чатов по chat_id
-- Команда /staff через username в Telegram, через id в конфиге
+Исправления v2:
+- Анонимные админы (sender_chat) могут использовать ВСЕ команды
+- preset_staff работает по username (как в оригинале)
+- Меню команд через set_my_commands (кнопка "/")
+- Все ChatPermissions обновлены под новый API
+- Все 11 ролей (0-10) корректно
 """
 
 import asyncio
@@ -18,13 +16,14 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Union, List, Tuple
+from typing import Optional, List
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER
 from aiogram.types import (
     Message, CallbackQuery, ChatMemberUpdated,
-    InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
+    ChatPermissions, BotCommand, BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ChatMemberStatus, ChatType
@@ -43,20 +42,18 @@ if os.path.exists(CONFIG_FILE):
         config = json.load(f)
 
 BOT_TOKEN = config.get("bot_token", os.getenv("BOT_TOKEN", ""))
-MODERATED_CHATS = config.get("moderated_chats", [])  # Список ID чатов
-PRESET_STAFF = config.get("preset_staff", {})  # {"user_id": {"role": N, "username": "xxx"}}
+MODERATED_CHATS = config.get("moderated_chats", [])
+PRESET_STAFF = config.get("preset_staff", {})  # {"username": role, ...}
 MAX_WARNS = config.get("max_warns", 3)
 SPAM_INTERVAL = config.get("spam_interval_seconds", 2)
 SPAM_COUNT = config.get("spam_messages_count", 3)
+ANON_ADMIN_ROLE = config.get("anon_admin_role", 10)  # Роль для анонимных админов
 
-# ID анонимного бота Telegram (GroupAnonymousBot)
-ANONYMOUS_BOT_ID = 1087968824
+ANONYMOUS_BOT_ID = 1087968824  # @GroupAnonymousBot
 
-# Логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -82,41 +79,54 @@ ROLE_NAMES = {
     10: "Владелец"
 }
 
-# Права по ролям:
-# 0: Пользователь — без прав модерации
-# 1-2: Младший/Модератор — мут (до 1ч), варн, удаление сообщений, кик
-# 3-4: Старший модератор/Куратор — мут (до 24ч), снятие варнов, бан/разбан, зов, назначение модераторов (до 2)
-# 5-6: Тех. специалист — мут без лимита, настройки чата (фильтр, тишина, антифлуд), запрещённые слова, setrole (до 4)
-# 7-8: Куратор/Зам — бан/разбан, назначение админов/ст. админов, setrole (до 6)
-# 9-10: Главный модератор/Владелец — глобальный бан, управление командой, рассылка, setrole (до 8/9)
-
+# Лимиты мута по ролям (0 = без лимита)
 MUTE_LIMITS = {1: 3600, 2: 3600, 3: 86400, 4: 86400, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0}
+
 
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================================================
 
-def is_anonymous(user_id: int) -> bool:
-    """Проверить, является ли отправитель анонимным ботом"""
-    return user_id == ANONYMOUS_BOT_ID
+def is_anon(message: Message) -> bool:
+    """Сообщение от анонимного админа?"""
+    if message.from_user and message.from_user.id == ANONYMOUS_BOT_ID:
+        return True
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return True
+    return False
 
 
-async def get_real_user_id(message: Message) -> int:
+async def get_caller_role(message: Message) -> int:
     """
-    Получить реальный user_id отправителя.
-    Если сообщение от анонимного бота — возвращаем 0 (неизвестен).
+    Получить роль вызывающего команду.
+    Если анонимный админ — возвращаем ANON_ADMIN_ROLE.
+    Если обычный пользователь — из БД.
     """
+    if is_anon(message):
+        return ANON_ADMIN_ROLE
+
     if not message.from_user:
         return 0
+
     uid = message.from_user.id
-    if is_anonymous(uid):
+    return await get_role(uid, message.chat.id)
+
+
+async def get_caller_id_safe(message: Message) -> int:
+    """
+    Получить ID вызывающего.
+    Для анонимных — возвращает 0 (неизвестен), но это OK для модерации.
+    """
+    if is_anon(message):
         return 0
-    return uid
+    if message.from_user:
+        return message.from_user.id
+    return 0
 
 
 async def get_role(user_id: int, chat_id: int = 0) -> int:
     """Получить роль пользователя (глобальная приоритетнее)"""
-    if user_id == 0 or is_anonymous(user_id):
+    if user_id == 0 or user_id == ANONYMOUS_BOT_ID:
         return 0
     global_role = await db.get_global_role(user_id)
     if global_role > 0:
@@ -126,31 +136,11 @@ async def get_role(user_id: int, chat_id: int = 0) -> int:
     return 0
 
 
-async def get_caller_id(message: Message) -> int:
-    """
-    Определить ID вызывающего команду.
-    Если вызвал анонимный бот — пытаемся определить по sender_chat (админ группы).
-    """
-    if message.from_user and not is_anonymous(message.from_user.id):
-        return message.from_user.id
-    # Если отправитель — анонимный бот, проверяем sender_chat
-    if message.sender_chat:
-        # Это админ, который пишет от имени группы — даём минимальную роль
-        # (он уже является администратором Telegram)
-        return 0  # Не можем определить конкретного пользователя
-    return 0
-
-
 async def get_user_info(user_id: int) -> dict:
-    """Получить инфо о пользователе через Telegram API"""
-    if user_id == 0 or is_anonymous(user_id):
-        return {
-            "id": user_id,
-            "first_name": "Аноним",
-            "last_name": "",
-            "username": "",
-            "full_name": "Анонимный пользователь"
-        }
+    """Получить инфо о пользователе"""
+    if user_id == 0 or user_id == ANONYMOUS_BOT_ID:
+        return {"id": user_id, "first_name": "Аноним", "last_name": "",
+                "username": "", "full_name": "Анонимный администратор"}
     try:
         user = await bot.get_chat(user_id)
         return {
@@ -161,19 +151,15 @@ async def get_user_info(user_id: int) -> dict:
             "full_name": user.full_name or f"User {user_id}"
         }
     except Exception:
-        # Пробуем из кэша username
-        cached_uname = await db.get_username_by_id(user_id)
+        cached = await db.get_username_by_id(user_id)
         return {
-            "id": user_id,
-            "first_name": "Пользователь",
-            "last_name": "",
-            "username": cached_uname or "",
-            "full_name": f"@{cached_uname}" if cached_uname else f"Пользователь {user_id}"
+            "id": user_id, "first_name": "Пользователь", "last_name": "",
+            "username": cached or "",
+            "full_name": f"@{cached}" if cached else f"Пользователь {user_id}"
         }
 
 
 async def get_user_name(user_id: int, chat_id: int = 0) -> str:
-    """Получить имя (ник или реальное)"""
     if chat_id:
         nick = await db.get_nick(user_id, chat_id)
         if nick:
@@ -183,26 +169,18 @@ async def get_user_name(user_id: int, chat_id: int = 0) -> str:
 
 
 async def mention(user_id: int, chat_id: int = 0) -> str:
-    """HTML-упоминание"""
-    if user_id == 0 or is_anonymous(user_id):
-        return "<i>Анонимный пользователь</i>"
+    if user_id == 0 or user_id == ANONYMOUS_BOT_ID:
+        return "<i>Анонимный администратор</i>"
     name = await get_user_name(user_id, chat_id)
     return f'<a href="tg://user?id={user_id}">{name}</a>'
 
 
 async def resolve_username(username: str) -> Optional[int]:
-    """
-    Резолвить username в user_id.
-    Сначала из кэша БД, потом через Telegram API.
-    """
+    """Резолв username → user_id (кэш + API)"""
     username = username.lower().lstrip('@')
-
-    # Из кэша
     cached = await db.get_user_by_username(username)
     if cached:
         return cached
-
-    # Через Telegram API
     try:
         user = await bot.get_chat(f"@{username}")
         if user and user.id:
@@ -210,23 +188,13 @@ async def resolve_username(username: str) -> Optional[int]:
             return user.id
     except Exception:
         pass
-
     return None
-
-
-async def resolve_user_in_chat(chat_id: int, user_id: int) -> bool:
-    """Проверить что пользователь есть/был в чате"""
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member is not None
-    except Exception:
-        return False
 
 
 async def parse_user(message: Message, args: list, start_idx: int = 1) -> Optional[int]:
     """
-    Универсальный парсер пользователя:
-    1. Реплай на сообщение (поддержка анонимных)
+    Парсер пользователя:
+    1. Реплай (не на анонима)
     2. @username
     3. Числовой ID
     4. Ник в чате
@@ -235,34 +203,25 @@ async def parse_user(message: Message, args: list, start_idx: int = 1) -> Option
     # 1. Реплай
     if message.reply_to_message:
         reply = message.reply_to_message
-        # Если ответ на сообщение обычного пользователя
-        if reply.from_user and not is_anonymous(reply.from_user.id):
+        if reply.from_user and reply.from_user.id != ANONYMOUS_BOT_ID:
             user = reply.from_user
             if user.username:
                 await db.cache_username(user.id, user.username)
             return user.id
-        # Если ответ на анонимное сообщение — ничего не можем сделать,
-        # идём дальше к аргументам
 
     # 2. Аргументы
     if len(args) <= start_idx:
-        # Если был реплай на анонимное сообщение и нет аргументов
         return None
 
     arg = args[start_idx].strip()
 
     # Числовой ID
     if arg.lstrip('-').isdigit():
-        uid = int(arg)
-        return uid
+        return int(arg)
 
     # @username
     if arg.startswith('@'):
-        username = arg[1:]
-        resolved = await resolve_username(username)
-        if resolved:
-            return resolved
-        return None
+        return await resolve_username(arg[1:])
 
     # Ник в чате
     if message.chat.id:
@@ -271,15 +230,10 @@ async def parse_user(message: Message, args: list, start_idx: int = 1) -> Option
             return by_nick
 
     # Username без @
-    resolved = await resolve_username(arg)
-    if resolved:
-        return resolved
-
-    return None
+    return await resolve_username(arg)
 
 
 def parse_time(s: str) -> Optional[int]:
-    """Парсинг времени: 30, 30m, 1h, 1d, 1w"""
     if not s:
         return None
     s = s.lower().strip()
@@ -291,115 +245,135 @@ def parse_time(s: str) -> Optional[int]:
             except Exception:
                 return None
     try:
-        return int(s) * 60  # По умолчанию минуты
+        return int(s) * 60
     except Exception:
         return None
 
 
 def format_time(sec: int) -> str:
-    """Форматирование секунд"""
-    if sec < 60:
-        return f"{sec}с"
-    if sec < 3600:
-        return f"{sec // 60}м"
-    if sec < 86400:
-        return f"{sec // 3600}ч"
+    if sec < 60: return f"{sec}с"
+    if sec < 3600: return f"{sec // 60}м"
+    if sec < 86400: return f"{sec // 3600}ч"
     return f"{sec // 86400}д"
 
 
 def format_dt(ts: int) -> str:
-    """Форматирование timestamp"""
     return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
 
 
-def full_permissions() -> ChatPermissions:
-    """Полные права для размута (новый API)"""
-    return ChatPermissions(
-        can_send_messages=True,
-        can_send_audios=True,
-        can_send_documents=True,
-        can_send_photos=True,
-        can_send_videos=True,
-        can_send_video_notes=True,
-        can_send_voice_notes=True,
-        can_send_polls=True,
-        can_send_other_messages=True,
-        can_add_web_page_previews=True,
-        can_change_info=False,
-        can_invite_users=True,
-        can_pin_messages=False,
-        can_manage_topics=False
-    )
-
-
 def muted_permissions() -> ChatPermissions:
-    """Права замученного (всё запрещено)"""
     return ChatPermissions(
-        can_send_messages=False,
-        can_send_audios=False,
-        can_send_documents=False,
-        can_send_photos=False,
-        can_send_videos=False,
-        can_send_video_notes=False,
-        can_send_voice_notes=False,
-        can_send_polls=False,
-        can_send_other_messages=False,
-        can_add_web_page_previews=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-        can_manage_topics=False
+        can_send_messages=False, can_send_audios=False,
+        can_send_documents=False, can_send_photos=False,
+        can_send_videos=False, can_send_video_notes=False,
+        can_send_voice_notes=False, can_send_polls=False,
+        can_send_other_messages=False, can_add_web_page_previews=False,
+        can_change_info=False, can_invite_users=False,
+        can_pin_messages=False, can_manage_topics=False
     )
+
+
+def full_permissions() -> ChatPermissions:
+    return ChatPermissions(
+        can_send_messages=True, can_send_audios=True,
+        can_send_documents=True, can_send_photos=True,
+        can_send_videos=True, can_send_video_notes=True,
+        can_send_voice_notes=True, can_send_polls=True,
+        can_send_other_messages=True, can_add_web_page_previews=True,
+        can_change_info=False, can_invite_users=True,
+        can_pin_messages=False, can_manage_topics=False
+    )
+
+
+def has_reply_target(message: Message) -> bool:
+    """Есть ли реплай на НЕ-анонимное сообщение"""
+    return (message.reply_to_message is not None
+            and message.reply_to_message.from_user is not None
+            and message.reply_to_message.from_user.id != ANONYMOUS_BOT_ID)
 
 
 async def init_staff():
     """
-    Инициализация предустановленной команды из конфига.
-    Формат config.preset_staff: {"user_id_str": {"role": N, "username": "xxx"}, ...}
+    Инициализация команды из конфига.
+    Поддерживает формат: {"username": role, ...}
+    Резолвит username → user_id через API.
     """
-    for uid_str, data in PRESET_STAFF.items():
+    for key, role_val in PRESET_STAFF.items():
         try:
-            user_id = int(uid_str)
-            role = data.get("role", 0) if isinstance(data, dict) else int(data)
-            username = data.get("username", "") if isinstance(data, dict) else ""
-
+            role = int(role_val)
             if role < 1 or role > 10:
-                logger.warning(f"Invalid role {role} for user {uid_str}, skipping")
                 continue
 
-            await db.set_global_role(user_id, role, username or None)
-
-            # Пытаемся закэшировать username если он указан
-            if username:
-                await db.cache_username(user_id, username)
-                # Пытаемся верифицировать через API
+            # Ключ — это username или user_id?
+            if key.lstrip('-').isdigit():
+                # Числовой ID
+                user_id = int(key)
+                await db.set_global_role(user_id, role, None)
+                logger.info(f"Staff init: ID {user_id} → роль {role}")
+            else:
+                # Username — резолвим
+                username = key.lstrip('@').lower()
                 try:
                     user = await bot.get_chat(f"@{username}")
-                    if user.id != user_id:
-                        logger.warning(
-                            f"Username @{username} resolves to {user.id}, "
-                            f"but config says {user_id}. Using config ID."
-                        )
-                except Exception:
-                    pass  # Не страшно, бот мог не видеть пользователя
-
-            logger.info(f"Staff init: ID {user_id} (@{username}) -> role {role} ({ROLE_NAMES.get(role, '?')})")
+                    await db.set_global_role(user.id, role, username)
+                    await db.cache_username(user.id, username)
+                    logger.info(f"Staff init: @{username} (ID {user.id}) → роль {role} ({ROLE_NAMES.get(role)})")
+                except Exception as e:
+                    # Не удалось резолвить — сохраняем только username, без ID
+                    # Когда пользователь напишет в чат, его ID закэшируется
+                    logger.warning(f"Не удалось найти @{username}: {e}. "
+                                   f"Роль будет назначена когда пользователь напишет в чат.")
+                    await db.save_pending_staff(username, role)
 
         except (ValueError, TypeError) as e:
-            logger.warning(f"Could not init staff entry {uid_str}: {e}")
+            logger.warning(f"Ошибка инициализации стаффа {key}: {e}")
 
 
-async def check_moderated_chat(message: Message) -> bool:
-    """Проверить, что чат в списке модерируемых (или зарегистрирован)"""
-    chat_id = message.chat.id
-    # Если список пуст — работаем во всех чатах
-    if not MODERATED_CHATS:
-        return True
-    # Если чат в списке — ок
-    if chat_id in MODERATED_CHATS:
-        return True
-    # Проверяем в базе
-    return await db.chat_exists(chat_id)
+async def register_commands():
+    """Регистрация меню команд (кнопка /)"""
+    # Команды для групп
+    group_commands = [
+        BotCommand(command="help", description="📋 Команды бота"),
+        BotCommand(command="id", description="🆔 Узнать ID"),
+        BotCommand(command="stats", description="📊 Статистика пользователя"),
+        BotCommand(command="mystatus", description="👤 Мой статус"),
+        BotCommand(command="staff", description="👥 Состав команды"),
+        BotCommand(command="top", description="🏆 Топ по сообщениям"),
+        BotCommand(command="mute", description="🔇 Замутить пользователя"),
+        BotCommand(command="unmute", description="🔊 Снять мут"),
+        BotCommand(command="warn", description="⚠️ Выдать предупреждение"),
+        BotCommand(command="unwarn", description="✅ Снять варн"),
+        BotCommand(command="kick", description="👢 Кикнуть"),
+        BotCommand(command="ban", description="🚫 Забанить"),
+        BotCommand(command="unban", description="✅ Разбанить"),
+        BotCommand(command="setnick", description="📝 Установить ник"),
+        BotCommand(command="del", description="🗑 Удалить сообщение"),
+        BotCommand(command="clear", description="🧹 Очистить сообщения"),
+        BotCommand(command="setrole", description="⚙️ Установить роль"),
+        BotCommand(command="gban", description="🌐 Глобальный бан"),
+        BotCommand(command="addstaff", description="➕ Добавить в команду"),
+        BotCommand(command="quiet", description="🔇 Режим тишины"),
+        BotCommand(command="antiflood", description="🛡 Антифлуд"),
+        BotCommand(command="filter", description="🔠 Фильтр слов"),
+        BotCommand(command="banword", description="🚫 Запретить слово"),
+        BotCommand(command="welcome", description="👋 Приветствие"),
+        BotCommand(command="broadcast", description="📢 Рассылка"),
+    ]
+
+    # Команды для ЛС
+    private_commands = [
+        BotCommand(command="start", description="▶️ Запуск бота"),
+        BotCommand(command="help", description="📋 Команды бота"),
+        BotCommand(command="mystatus", description="👤 Мой статус"),
+        BotCommand(command="staff", description="👥 Состав команды"),
+    ]
+
+    try:
+        await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+        await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+        logger.info("Команды бота зарегистрированы")
+    except Exception as e:
+        logger.warning(f"Не удалось зарегистрировать команды: {e}")
 
 
 # =============================================================================
@@ -408,22 +382,20 @@ async def check_moderated_chat(message: Message) -> bool:
 
 @router.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def on_user_join(event: ChatMemberUpdated):
-    """Проверка при входе в группу"""
     user = event.new_chat_member.user
     chat_id = event.chat.id
 
-    # Пропускаем ботов
     if user.is_bot:
         return
 
-    # Регистрируем чат
     await db.register_chat(chat_id, event.chat.title or "")
 
-    # Кэшируем username
     if user.username:
         await db.cache_username(user.id, user.username)
+        # Проверяем отложенную роль
+        await db.apply_pending_staff(user.id, user.username)
 
-    # Проверяем глобальный бан
+    # Глобальный бан
     gban = await db.get_global_ban(user.id)
     if gban:
         try:
@@ -486,14 +458,12 @@ async def cmd_start(message: Message):
         )
     else:
         await db.register_chat(message.chat.id, message.chat.title or "")
-        await message.answer("✅ Бот активирован!")
+        await message.answer("✅ Бот активирован в этом чате!")
 
 
 @router.message(Command("help", "помощь", "хелп", "команды", "commands"))
 async def cmd_help(message: Message):
-    caller_id = await get_caller_id(message)
-    chat_id = message.chat.id
-    role = await get_role(caller_id, chat_id) if caller_id else 0
+    role = await get_caller_role(message)
 
     text = "🔵 <b>Модерация Анонимные сообщения | Георгиевка</b>\n"
     text += "👥 <b>Команды бота</b>\n\n"
@@ -502,105 +472,102 @@ async def cmd_help(message: Message):
     text += "/id — узнать ID\n"
     text += "/stats — статистика\n"
     text += "/mystatus — мой статус\n"
-    text += "/staff — команда\n\n"
+    text += "/staff — команда\n"
+    text += "/top — топ сообщений\n\n"
 
     if role >= 1:
-        text += "<b>🛡 Младший модератор / Модератор (1-2):</b>\n"
-        text += "/mute время причина — мут\n"
-        text += "/unmute — снять мут\n"
-        text += "/warn причина — варн\n"
-        text += "/unwarn — снять варн\n"
+        text += "<b>🛡 Модератор (1-2):</b>\n"
+        text += "/mute @user 30m причина — мут\n"
+        text += "/unmute @user — снять мут\n"
+        text += "/warn @user причина — варн\n"
+        text += "/unwarn @user — снять варн\n"
         text += "/getwarn — инфо о варнах\n"
         text += "/warnhistory — история варнов\n"
         text += "/warnlist — список с варнами\n"
-        text += "/kick причина — кик\n"
-        text += "/del — удалить сообщение\n"
-        text += "/clear — очистить сообщения\n"
-        text += "/setnick ник — установить ник\n"
-        text += "/removenick — удалить ник\n"
+        text += "/kick @user — кик\n"
+        text += "/del — удалить сообщение (реплай)\n"
+        text += "/clear @user — очистить сообщения\n"
+        text += "/setnick @user ник — ник\n"
+        text += "/removenick @user — удалить ник\n"
         text += "/getnick — узнать ник\n"
         text += "/getacc ник — найти по нику\n"
         text += "/nlist — список ников\n"
-        text += "/mutelist — список мутов\n"
-        text += "/reg — дата регистрации\n\n"
+        text += "/mutelist — список мутов\n\n"
 
     if role >= 3:
-        text += "<b>🛡 Старший модератор / Куратор (3-4):</b>\n"
-        text += "/ban причина — бан\n"
-        text += "/unban — разбан\n"
+        text += "<b>🛡 Старший модератор (3-4):</b>\n"
+        text += "/ban @user причина — бан\n"
+        text += "/unban @user — разбан\n"
         text += "/getban — инфо о бане\n"
         text += "/banlist — список банов\n"
         text += "/zov — упомянуть всех\n"
         text += "/online — команда чата\n"
-        text += "/addmoder — выдать модера (роль 1)\n"
-        text += "/removerole — снять роль\n\n"
+        text += "/addmoder @user — модер (1)\n"
+        text += "/removerole @user — снять роль\n\n"
 
     if role >= 5:
         text += "<b>⚙️ Тех. специалист (5-6):</b>\n"
-        text += "/setrole уровень — установить роль\n"
-        text += "/banword — запретить слово\n"
-        text += "/unbanword — разрешить слово\n"
-        text += "/banwords — запрещённые слова\n"
-        text += "/filter — вкл/выкл фильтр слов\n"
+        text += "/setrole @user роль — установить\n"
+        text += "/banword слово — запретить\n"
+        text += "/unbanword — разрешить\n"
+        text += "/banwords — список\n"
+        text += "/filter — фильтр вкл/выкл\n"
         text += "/welcome текст — приветствие\n"
-        text += "/quiet — режим тишины\n"
+        text += "/quiet — тишина\n"
         text += "/antiflood — антифлуд\n"
         text += "/rnickall — удалить все ники\n\n"
 
     if role >= 7:
-        text += "<b>👑 Куратор / Зам (7-8):</b>\n"
-        text += "/addadmin — выдать админа (роль 3)\n"
-        text += "/addsenadmin — выдать ст. админа (роль 5)\n\n"
+        text += "<b>👑 Куратор (7-8):</b>\n"
+        text += "/addadmin @user — админ (3)\n"
+        text += "/addsenadmin @user — ст. админ (5)\n\n"
 
     if role >= 9:
-        text += "<b>🌐 Главный модератор / Владелец (9-10):</b>\n"
-        text += "/gban причина — глобальный бан\n"
-        text += "/gunban — снять глоб. бан\n"
+        text += "<b>🌐 Главный модератор (9-10):</b>\n"
+        text += "/gban @user — глоб. бан\n"
+        text += "/gunban @user — снять глоб. бан\n"
         text += "/gbanlist — список глоб. банов\n"
-        text += "/addstaff @username роль — добавить в команду\n"
-        text += "/removestaff @username — удалить из команды\n"
-        text += "/broadcast — рассылка\n"
+        text += "/addstaff @user роль — в команду\n"
+        text += "/removestaff @user — из команды\n"
+        text += "/broadcast текст — рассылка\n"
 
     await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("id", "ид", "getid"))
 async def cmd_id(message: Message):
-    """Узнать ID"""
     args = message.text.split()
     target = await parse_user(message, args, 1)
+
     if not target:
-        caller = await get_caller_id(message)
-        if caller:
-            target = caller
-        else:
-            # Показываем ID чата
+        if is_anon(message):
             await message.answer(
                 f"🆔 <b>ID чата:</b> <code>{message.chat.id}</code>\n"
-                f"<b>Название:</b> {message.chat.title or '-'}",
+                f"<b>Название:</b> {message.chat.title or '-'}\n\n"
+                f"<i>Вы отправляете анонимно — ваш личный ID не виден.</i>",
                 parse_mode="HTML"
             )
             return
+        target = message.from_user.id
 
     info = await get_user_info(target)
     text = f"🆔 <b>ID:</b> <code>{target}</code>\n"
     text += f"<b>Имя:</b> {info['full_name']}\n"
     if info['username']:
         text += f"<b>Username:</b> @{info['username']}"
-
     await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("stats", "стата", "статистика"))
 async def cmd_stats(message: Message):
-    """Статистика пользователя"""
     args = message.text.split()
     target = await parse_user(message, args, 1)
+
     if not target:
-        target = await get_caller_id(message)
-        if not target:
-            await message.reply("❌ Не удалось определить пользователя. Укажите @username или ID.")
+        if is_anon(message):
+            await message.reply("❌ Укажите пользователя: /stats @username или /stats ID")
             return
+        target = message.from_user.id
 
     chat_id = message.chat.id
     info = await get_user_info(target)
@@ -630,12 +597,12 @@ async def cmd_stats(message: Message):
         text += f"🚫 <b>Глобальный бан:</b> {gban.get('reason', '-')}\n"
 
     # Кнопки для модераторов
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, chat_id) if caller_id else 0
+    my_role = await get_caller_role(message)
+    caller_id = await get_caller_id_safe(message)
     if my_role >= 1 and target != caller_id:
         kb = InlineKeyboardBuilder()
         kb.button(text="📜 История варнов", callback_data=f"wh:{target}:{chat_id}")
-        kb.button(text="🔇 Мут", callback_data=f"qmute:{target}:{chat_id}")
+        kb.button(text="🔇 Мут 30м", callback_data=f"qmute:{target}:{chat_id}")
         kb.adjust(2)
         await message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
     else:
@@ -644,23 +611,22 @@ async def cmd_stats(message: Message):
 
 @router.message(Command("mystatus"))
 async def cmd_mystatus(message: Message):
-    """Мой статус"""
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас. Отправьте команду не анонимно.")
+    if is_anon(message):
+        await message.reply(
+            "❌ Вы отправляете анонимно — не могу определить ваш аккаунт.\n"
+            "Используйте: /stats @ваш_username"
+        )
         return
-    message.text = f"/stats {caller_id}"
+    # Подменяем текст и вызываем stats
+    message.text = f"/stats {message.from_user.id}"
     await cmd_stats(message)
 
 
 @router.message(Command("staff", "стафф", "команда"))
 async def cmd_staff(message: Message):
-    """Состав команды"""
     chat_id = message.chat.id
 
-    # Глобальная команда
     global_staff = await db.get_all_staff()
-    # Локальная команда
     local_staff = await db.get_chat_staff(chat_id) if message.chat.type != ChatType.PRIVATE else []
 
     if not global_staff and not local_staff:
@@ -670,25 +636,40 @@ async def cmd_staff(message: Message):
     text = "🔵 <b>Модерация Анонимные сообщения | Георгиевка</b>\n"
     text += "👥 <b>Состав команды</b>\n\n"
 
-    # Объединяем и группируем
+    # Собираем всех
     all_members = {}
 
     for s in global_staff:
         uid = s['user_id']
-        role_num = s['role']
-        uname = s.get('username', '')
-        all_members[uid] = {'role': role_num, 'username': uname, 'source': 'global'}
+        all_members[uid] = {'role': s['role'], 'username': s.get('username', ''), 'source': 'global'}
 
     for s in local_staff:
         uid = s['user_id']
         if uid not in all_members:
-            uname_cached = await db.get_username_by_id(uid)
-            all_members[uid] = {'role': s['role'], 'username': uname_cached or '', 'source': 'local'}
+            cached = await db.get_username_by_id(uid)
+            all_members[uid] = {'role': s['role'], 'username': cached or '', 'source': 'local'}
+
+    # Также показываем отложенные (pending) роли
+    pending = await db.get_all_pending_staff()
+    for p in pending:
+        # pending не имеют user_id, показываем только username
+        found = False
+        for uid, data in all_members.items():
+            if data.get('username', '').lower() == p['username'].lower():
+                found = True
+                break
+        if not found:
+            all_members[f"pending_{p['username']}"] = {
+                'role': p['role'], 'username': p['username'],
+                'source': 'pending', 'is_pending': True
+            }
 
     # Группируем по ролям
     by_role = {}
     for uid, data in all_members.items():
         r = data['role']
+        if r < 1:
+            continue
         if r not in by_role:
             by_role[r] = []
         by_role[r].append((uid, data))
@@ -696,10 +677,10 @@ async def cmd_staff(message: Message):
     for role_num in sorted(by_role.keys(), reverse=True):
         text += f"<b>{role_num:02d}. {ROLE_NAMES.get(role_num, '?')}</b>\n"
         for uid, data in by_role[role_num]:
-            uname = data['username']
+            uname = data.get('username', '')
             if uname:
                 text += f"   @{uname}\n"
-            else:
+            elif isinstance(uid, int):
                 text += f"   ID: <code>{uid}</code>\n"
         text += "\n"
 
@@ -708,11 +689,14 @@ async def cmd_staff(message: Message):
 
 @router.message(Command("reg", "registration", "регистрация"))
 async def cmd_reg(message: Message):
-    """Дата регистрации"""
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
-        target = await get_caller_id(message) or (message.from_user.id if message.from_user else 0)
+        target = message.from_user.id if message.from_user and not is_anon(message) else 0
+
+    if not target:
+        await message.reply("❌ Укажите пользователя: /reg @username")
+        return
 
     await message.answer(
         f"🆔 ID: <code>{target}</code>\n"
@@ -727,16 +711,10 @@ async def cmd_reg(message: Message):
 
 @router.message(Command("mute", "мут"))
 async def cmd_mute(message: Message):
-    """Замутить пользователя"""
     if message.chat.type == ChatType.PRIVATE:
         return
 
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас. Используйте команду не анонимно.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -747,7 +725,7 @@ async def cmd_mute(message: Message):
         await message.reply(
             "❌ Укажите пользователя!\n\n"
             "<b>Примеры:</b>\n"
-            "• /mute @username 30 спам\n"
+            "• /mute @username 30m спам\n"
             "• /mute 123456789 1h причина\n"
             "• Ответьте на сообщение: /mute 30 причина",
             parse_mode="HTML"
@@ -759,8 +737,7 @@ async def cmd_mute(message: Message):
         await message.reply("❌ Нельзя замутить пользователя с такой же или выше ролью!")
         return
 
-    # Парсим аргументы
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     time_idx = 1 if has_reply else 2
     reason_idx = time_idx + 1
 
@@ -771,7 +748,6 @@ async def cmd_mute(message: Message):
     if not duration:
         duration = 30 * 60
 
-    # Проверяем лимит
     limit = MUTE_LIMITS.get(my_role, 0)
     if limit > 0 and duration > limit:
         await message.reply(f"❌ Ваш лимит: {format_time(limit)}")
@@ -786,15 +762,16 @@ async def cmd_mute(message: Message):
             until_date=timedelta(seconds=duration)
         )
     except TelegramBadRequest as e:
-        await message.reply(f"❌ Ошибка Telegram: {e.message}")
+        await message.reply(f"❌ Ошибка: {e.message}")
         return
     except TelegramForbiddenError:
-        await message.reply("❌ У бота нет прав администратора!")
+        await message.reply("❌ У бота нет прав!")
         return
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
         return
 
+    caller_id = await get_caller_id_safe(message)
     await db.add_mute(target, message.chat.id, caller_id, reason, until)
 
     kb = InlineKeyboardBuilder()
@@ -814,16 +791,10 @@ async def cmd_mute(message: Message):
 
 @router.message(Command("unmute", "размут", "анмут"))
 async def cmd_unmute(message: Message):
-    """Снять мут"""
     if message.chat.type == ChatType.PRIVATE:
         return
 
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -835,10 +806,7 @@ async def cmd_unmute(message: Message):
         return
 
     try:
-        await bot.restrict_chat_member(
-            message.chat.id, target,
-            permissions=full_permissions()
-        )
+        await bot.restrict_chat_member(message.chat.id, target, permissions=full_permissions())
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
         return
@@ -851,17 +819,12 @@ async def cmd_unmute(message: Message):
 async def cb_unmute(call: CallbackQuery):
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
-
     role = await get_role(call.from_user.id, chat_id)
     if role < 1:
         await call.answer("Недостаточно прав!", show_alert=True)
         return
-
     try:
-        await bot.restrict_chat_member(
-            chat_id, target,
-            permissions=full_permissions()
-        )
+        await bot.restrict_chat_member(chat_id, target, permissions=full_permissions())
         await db.remove_mute(target, chat_id)
         await call.answer("✅ Мут снят!", show_alert=True)
         await call.message.edit_reply_markup(reply_markup=None)
@@ -871,9 +834,7 @@ async def cb_unmute(call: CallbackQuery):
 
 @router.message(Command("getmute", "gmute", "гетмут"))
 async def cmd_getmute(message: Message):
-    """Информация о муте"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -890,7 +851,7 @@ async def cmd_getmute(message: Message):
         return
 
     await message.answer(
-        f"🔇 <b>Мут пользователя</b>\n\n"
+        f"🔇 <b>Мут</b>\n\n"
         f"<b>Кто:</b> {await mention(target)}\n"
         f"<b>До:</b> {format_dt(mute['until'])}\n"
         f"<b>Причина:</b> {mute.get('reason', '-')}\n"
@@ -901,9 +862,7 @@ async def cmd_getmute(message: Message):
 
 @router.message(Command("mutelist", "мутлист"))
 async def cmd_mutelist(message: Message):
-    """Список замученных"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -916,10 +875,8 @@ async def cmd_mutelist(message: Message):
     text = "🔇 <b>Список мутов</b>\n\n"
     for m in mutes[:15]:
         text += f"• <code>{m['user_id']}</code> — до {format_dt(m['until'])}\n"
-
     if len(mutes) > 15:
         text += f"\n<i>...и ещё {len(mutes) - 15}</i>"
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -929,16 +886,10 @@ async def cmd_mutelist(message: Message):
 
 @router.message(Command("warn", "пред", "варн"))
 async def cmd_warn(message: Message):
-    """Выдать предупреждение"""
     if message.chat.type == ChatType.PRIVATE:
         return
 
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -954,10 +905,11 @@ async def cmd_warn(message: Message):
         await message.reply("❌ Нельзя выдать варн этому пользователю!")
         return
 
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     reason_idx = 1 if has_reply else 2
     reason = " ".join(args[reason_idx:]) if len(args) > reason_idx else "Нарушение правил"
 
+    caller_id = await get_caller_id_safe(message)
     warns = await db.add_warn(target, message.chat.id, caller_id, reason)
 
     kb = InlineKeyboardBuilder()
@@ -972,7 +924,6 @@ async def cmd_warn(message: Message):
         f"<b>Модератор:</b> {await mention(caller_id)}"
     )
 
-    # Автокик при MAX_WARNS
     if warns >= MAX_WARNS:
         try:
             await bot.ban_chat_member(message.chat.id, target)
@@ -989,9 +940,7 @@ async def cmd_warn(message: Message):
 
 @router.message(Command("unwarn", "унварн", "снятьпред"))
 async def cmd_unwarn(message: Message):
-    """Снять предупреждение"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1009,8 +958,7 @@ async def cmd_unwarn(message: Message):
 
     remaining = await db.remove_warn(target, message.chat.id)
     await message.answer(
-        f"✅ Варн снят: {await mention(target)}\n"
-        f"Осталось: {remaining}/{MAX_WARNS}",
+        f"✅ Варн снят: {await mention(target)}\nОсталось: {remaining}/{MAX_WARNS}",
         parse_mode="HTML"
     )
 
@@ -1019,12 +967,10 @@ async def cmd_unwarn(message: Message):
 async def cb_unwarn(call: CallbackQuery):
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
-
     role = await get_role(call.from_user.id, chat_id)
     if role < 1:
         await call.answer("Недостаточно прав!", show_alert=True)
         return
-
     remaining = await db.remove_warn(target, chat_id)
     await call.answer(f"✅ Варн снят. Осталось: {remaining}/{MAX_WARNS}", show_alert=True)
     await call.message.edit_reply_markup(reply_markup=None)
@@ -1032,9 +978,7 @@ async def cb_unwarn(call: CallbackQuery):
 
 @router.message(Command("getwarn", "gwarn", "гетварн"))
 async def cmd_getwarn(message: Message):
-    """Информация о варнах"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1047,29 +991,26 @@ async def cmd_getwarn(message: Message):
 
     warn_info = await db.get_warn_info(target, message.chat.id)
     if not warn_info:
-        await message.answer(f"✅ У {await mention(target)} нет активных варнов", parse_mode="HTML")
+        await message.answer(f"✅ У {await mention(target)} нет варнов", parse_mode="HTML")
         return
 
     kb = InlineKeyboardBuilder()
     kb.button(text="📜 История", callback_data=f"wh:{target}:{message.chat.id}")
 
     await message.answer(
-        f"⚠️ <b>Варны пользователя</b>\n\n"
+        f"⚠️ <b>Варны</b>\n\n"
         f"<b>Кто:</b> {await mention(target)}\n"
         f"<b>Варнов:</b> {warn_info['count']}/{MAX_WARNS}\n"
-        f"<b>Последняя причина:</b> {warn_info.get('reason', '-')}\n"
+        f"<b>Причина:</b> {warn_info.get('reason', '-')}\n"
         f"<b>Модератор:</b> {await mention(warn_info['warned_by'])}\n"
         f"<b>Когда:</b> {format_dt(warn_info['warned_at'])}",
-        parse_mode="HTML",
-        reply_markup=kb.as_markup()
+        parse_mode="HTML", reply_markup=kb.as_markup()
     )
 
 
 @router.message(Command("warnhistory", "whistory", "историяварнов"))
 async def cmd_warnhistory(message: Message):
-    """История варнов"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1088,7 +1029,6 @@ async def cmd_warnhistory(message: Message):
     text = f"📜 <b>История варнов</b> {await mention(target)}\n\n"
     for i, w in enumerate(history, 1):
         text += f"{i}) {await mention(w['warned_by'])} | {w.get('reason', '-')[:30]} | {format_dt(w['warned_at'])}\n"
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1096,24 +1036,19 @@ async def cmd_warnhistory(message: Message):
 async def cb_warnhistory(call: CallbackQuery):
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
-
     history = await db.get_warn_history(target, chat_id, 5)
     if not history:
         await call.answer("История пуста", show_alert=True)
         return
-
     text = "📜 Последние варны:\n\n"
     for i, w in enumerate(history, 1):
         text += f"{i}) {w.get('reason', '-')[:25]} | {format_dt(w['warned_at'])}\n"
-
     await call.answer(text, show_alert=True)
 
 
 @router.message(Command("warnlist", "варнлист"))
 async def cmd_warnlist(message: Message):
-    """Список пользователей с варнами"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1126,7 +1061,6 @@ async def cmd_warnlist(message: Message):
     text = "⚠️ <b>Пользователи с варнами</b>\n\n"
     for w in warns[:15]:
         text += f"• <code>{w['user_id']}</code> — {w['count']}/{MAX_WARNS} | {w.get('reason', '-')[:20]}\n"
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1136,16 +1070,10 @@ async def cmd_warnlist(message: Message):
 
 @router.message(Command("ban", "бан"))
 async def cmd_ban(message: Message):
-    """Забанить"""
     if message.chat.type == ChatType.PRIVATE:
         return
 
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав! Нужен уровень 3+")
         return
@@ -1161,7 +1089,7 @@ async def cmd_ban(message: Message):
         await message.reply("❌ Нельзя забанить этого пользователя!")
         return
 
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     reason = " ".join(args[1 if has_reply else 2:]) or "Нарушение правил"
 
     try:
@@ -1170,6 +1098,7 @@ async def cmd_ban(message: Message):
         await message.reply(f"❌ Ошибка: {e}")
         return
 
+    caller_id = await get_caller_id_safe(message)
     await db.add_ban(target, message.chat.id, caller_id, reason)
 
     kb = InlineKeyboardBuilder()
@@ -1180,16 +1109,13 @@ async def cmd_ban(message: Message):
         f"<b>Кто:</b> {await mention(target, message.chat.id)}\n"
         f"<b>Причина:</b> {reason}\n"
         f"<b>Модератор:</b> {await mention(caller_id)}",
-        parse_mode="HTML",
-        reply_markup=kb.as_markup()
+        parse_mode="HTML", reply_markup=kb.as_markup()
     )
 
 
 @router.message(Command("unban", "разбан"))
 async def cmd_unban(message: Message):
-    """Разбанить"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1214,12 +1140,10 @@ async def cmd_unban(message: Message):
 async def cb_unban(call: CallbackQuery):
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
-
     role = await get_role(call.from_user.id, chat_id)
     if role < 3:
         await call.answer("Недостаточно прав!", show_alert=True)
         return
-
     try:
         await bot.unban_chat_member(chat_id, target, only_if_banned=True)
         await db.remove_ban(target, chat_id)
@@ -1231,9 +1155,7 @@ async def cb_unban(call: CallbackQuery):
 
 @router.message(Command("getban", "гетбан"))
 async def cmd_getban(message: Message):
-    """Информация о бане"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1261,9 +1183,7 @@ async def cmd_getban(message: Message):
 
 @router.message(Command("banlist", "банлист"))
 async def cmd_banlist(message: Message):
-    """Список банов"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1276,15 +1196,12 @@ async def cmd_banlist(message: Message):
     text = "🚫 <b>Забаненные</b>\n\n"
     for b in bans[:15]:
         text += f"• <code>{b['user_id']}</code> | {b.get('reason', '-')[:25]}\n"
-
     await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("online", "онлайн"))
 async def cmd_online(message: Message):
-    """Показать команду чата"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1299,39 +1216,29 @@ async def cmd_online(message: Message):
     text = "👥 <b>Команда чата</b>\n\n"
 
     if global_staff:
-        text += "<b>🌐 Глобальная команда:</b>\n"
+        text += "<b>🌐 Глобальная:</b>\n"
         for s in global_staff[:10]:
-            role_name = ROLE_NAMES.get(s['role'], '?')
             uname = s.get('username')
             name = f"@{uname}" if uname else f"ID: <code>{s['user_id']}</code>"
-            text += f"• {name} — {role_name} ({s['role']})\n"
+            text += f"• {name} — {ROLE_NAMES.get(s['role'], '?')} ({s['role']})\n"
         text += "\n"
 
     if chat_staff:
-        text += "<b>🏠 Локальная команда:</b>\n"
+        text += "<b>🏠 Локальная:</b>\n"
         for s in chat_staff[:10]:
-            role_name = ROLE_NAMES.get(s['role'], '?')
-            cached_uname = await db.get_username_by_id(s['user_id'])
-            name = f"@{cached_uname}" if cached_uname else f"ID: <code>{s['user_id']}</code>"
-            text += f"• {name} — {role_name} ({s['role']})\n"
-
-    text += "\n<i>💡 Telegram не показывает онлайн-статус в группах</i>"
+            cached = await db.get_username_by_id(s['user_id'])
+            name = f"@{cached}" if cached else f"ID: <code>{s['user_id']}</code>"
+            text += f"• {name} — {ROLE_NAMES.get(s['role'], '?')} ({s['role']})\n"
 
     await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("kick", "кик"))
 async def cmd_kick(message: Message):
-    """Кикнуть"""
     if message.chat.type == ChatType.PRIVATE:
         return
 
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1355,13 +1262,12 @@ async def cmd_kick(message: Message):
         await message.reply(f"❌ Ошибка: {e}")
         return
 
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     reason = " ".join(args[1 if has_reply else 2:]) or ""
 
     text = f"👢 {await mention(target, message.chat.id)} кикнут"
     if reason:
         text += f"\n<b>Причина:</b> {reason}"
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1371,9 +1277,7 @@ async def cmd_kick(message: Message):
 
 @router.message(Command("setnick", "snick", "ник"))
 async def cmd_setnick(message: Message):
-    """Установить ник"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1389,7 +1293,7 @@ async def cmd_setnick(message: Message):
         await message.reply("❌ Нельзя установить ник этому пользователю!")
         return
 
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     nick = " ".join(args[1 if has_reply else 2:])
     if not nick:
         await message.reply("❌ Укажите ник!")
@@ -1397,39 +1301,35 @@ async def cmd_setnick(message: Message):
 
     await db.set_nick(target, message.chat.id, nick)
     await message.answer(
-        f"✅ Ник установлен\n\n"
-        f"<b>Кто:</b> {await mention(target)}\n"
-        f"<b>Ник:</b> {nick}",
+        f"✅ Ник установлен\n<b>Кто:</b> {await mention(target)}\n<b>Ник:</b> {nick}",
         parse_mode="HTML"
     )
 
 
 @router.message(Command("removenick", "rnick", "удалитьник"))
 async def cmd_removenick(message: Message):
-    """Удалить ник"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     await db.remove_nick(target, message.chat.id)
     await message.answer(f"✅ Ник удалён: {await mention(target)}", parse_mode="HTML")
 
 
 @router.message(Command("getnick", "gnick", "гетник"))
 async def cmd_getnick(message: Message):
-    """Узнать ник"""
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
-        target = await get_caller_id(message) or (message.from_user.id if message.from_user else 0)
+        if is_anon(message):
+            await message.reply("❌ Укажите пользователя: /getnick @username")
+            return
+        target = message.from_user.id
 
     nick = await db.get_nick(target, message.chat.id)
     if nick:
@@ -1440,9 +1340,7 @@ async def cmd_getnick(message: Message):
 
 @router.message(Command("getacc", "acc", "аккаунт"))
 async def cmd_getacc(message: Message):
-    """Найти по нику"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1461,46 +1359,35 @@ async def cmd_getacc(message: Message):
     info = await get_user_info(user_id)
     await message.answer(
         f"🔍 <b>Найден по нику</b>\n\n"
-        f"<b>Ник:</b> {nick}\n"
-        f"<b>ID:</b> <code>{user_id}</code>\n"
-        f"<b>Имя:</b> {info['full_name']}",
+        f"<b>Ник:</b> {nick}\n<b>ID:</b> <code>{user_id}</code>\n<b>Имя:</b> {info['full_name']}",
         parse_mode="HTML"
     )
 
 
 @router.message(Command("nlist", "nicks", "ники"))
 async def cmd_nlist(message: Message):
-    """Список ников"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
-
     nicks = await db.get_nicks(message.chat.id)
     if not nicks:
         await message.answer("📋 Ников нет")
         return
-
     text = "📝 <b>Ники в чате</b>\n\n"
     for i, n in enumerate(nicks[:20], 1):
         text += f"{i}) <code>{n['user_id']}</code> — {n['nick']}\n"
-
     if len(nicks) > 20:
         text += f"\n<i>...и ещё {len(nicks) - 20}</i>"
-
     await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("rnickall", "clearnicks"))
 async def cmd_rnickall(message: Message):
-    """Удалить все ники"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
-        await message.reply("❌ Недостаточно прав! Нужен уровень 5+")
+        await message.reply("❌ Недостаточно прав!")
         return
-
     await db.clear_all_nicks(message.chat.id)
     await message.answer("✅ Все ники удалены")
 
@@ -1511,13 +1398,7 @@ async def cmd_rnickall(message: Message):
 
 @router.message(Command("gban", "глобан"))
 async def cmd_gban(message: Message):
-    """Глобальный бан"""
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 9:
         await message.reply("❌ Недостаточно прав! Нужен уровень 9+")
         return
@@ -1533,12 +1414,12 @@ async def cmd_gban(message: Message):
         await message.reply("❌ Нельзя забанить члена команды!")
         return
 
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     reason = " ".join(args[1 if has_reply else 2:]) or "Глобальное нарушение"
 
+    caller_id = await get_caller_id_safe(message)
     await db.add_global_ban(target, caller_id, reason)
 
-    # Банить во всех чатах
     chats = await db.get_all_chats()
     banned_count = 0
     for chat in chats:
@@ -1556,54 +1437,42 @@ async def cmd_gban(message: Message):
         f"<b>Модератор:</b> {await mention(caller_id)}",
         parse_mode="HTML"
     )
-    logger.info(f"GBAN: user={target}, by={caller_id}")
 
 
 @router.message(Command("gunban", "глобразбан"))
 async def cmd_gunban(message: Message):
-    """Снять глобальный бан"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     await db.remove_global_ban(target)
-
     chats = await db.get_all_chats()
     for chat in chats:
         try:
             await bot.unban_chat_member(chat['chat_id'], target, only_if_banned=True)
         except Exception:
             pass
-
     await message.answer(f"✅ Глобальный бан снят: {await mention(target)}", parse_mode="HTML")
 
 
 @router.message(Command("gbanlist", "глобанлист"))
 async def cmd_gbanlist(message: Message):
-    """Список глобальных банов"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
-
     bans = await db.get_global_bans()
     if not bans:
         await message.answer("📋 Глобальных банов нет")
         return
-
     text = "🚫 <b>Глобальные баны</b>\n\n"
     for b in bans[:20]:
         text += f"• <code>{b['user_id']}</code> — {b.get('reason', '-')[:30]}\n"
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1613,17 +1482,13 @@ async def cmd_gbanlist(message: Message):
 
 @router.message(Command("del", "delete", "удалить"))
 async def cmd_del(message: Message):
-    """Удалить сообщение"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
-
     if not message.reply_to_message:
         await message.reply("❌ Ответьте на сообщение!")
         return
-
     try:
         await message.reply_to_message.delete()
         await message.delete()
@@ -1633,24 +1498,19 @@ async def cmd_del(message: Message):
 
 @router.message(Command("clear", "очистить"))
 async def cmd_clear(message: Message):
-    """Очистить сообщения пользователя"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     msg_ids = await db.get_user_messages(target, message.chat.id, 100)
     if not msg_ids:
         await message.answer("📋 Сообщений не найдено")
         return
-
     deleted = 0
     for msg_id in msg_ids:
         try:
@@ -1658,21 +1518,18 @@ async def cmd_clear(message: Message):
             deleted += 1
         except Exception:
             pass
-
     await db.clear_user_messages(target, message.chat.id)
-    await message.answer(f"🧹 Удалено {deleted} сообщений пользователя <code>{target}</code>", parse_mode="HTML")
+    await message.answer(f"🧹 Удалено {deleted} сообщений", parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("clear:"))
 async def cb_clear(call: CallbackQuery):
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
-
     role = await get_role(call.from_user.id, chat_id)
     if role < 1:
         await call.answer("Недостаточно прав!", show_alert=True)
         return
-
     msg_ids = await db.get_user_messages(target, chat_id, 50)
     deleted = 0
     for msg_id in msg_ids:
@@ -1681,7 +1538,6 @@ async def cb_clear(call: CallbackQuery):
             deleted += 1
         except Exception:
             pass
-
     await db.clear_user_messages(target, chat_id)
     await call.answer(f"🧹 Удалено {deleted} сообщений", show_alert=True)
 
@@ -1692,13 +1548,7 @@ async def cb_clear(call: CallbackQuery):
 
 @router.message(Command("setrole", "роль"))
 async def cmd_setrole(message: Message):
-    """Установить роль в чате"""
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав! Нужен уровень 5+")
         return
@@ -1709,7 +1559,7 @@ async def cmd_setrole(message: Message):
         await message.reply("❌ Укажите пользователя!")
         return
 
-    has_reply = message.reply_to_message is not None and message.reply_to_message.from_user and not is_anonymous(message.reply_to_message.from_user.id)
+    has_reply = has_reply_target(message)
     role_idx = 1 if has_reply else 2
 
     if len(args) <= role_idx:
@@ -1732,14 +1582,8 @@ async def cmd_setrole(message: Message):
 
     await db.set_user_role(target, message.chat.id, new_role)
 
-    # Кэшируем username если есть
-    info = await get_user_info(target)
-    if info.get('username'):
-        await db.cache_username(target, info['username'])
-
     await message.answer(
-        f"✅ Роль установлена\n\n"
-        f"<b>Кто:</b> {await mention(target)}\n"
+        f"✅ Роль установлена\n<b>Кто:</b> {await mention(target)}\n"
         f"<b>Роль:</b> {ROLE_NAMES.get(new_role, '?')} ({new_role})",
         parse_mode="HTML"
     )
@@ -1747,101 +1591,71 @@ async def cmd_setrole(message: Message):
 
 @router.message(Command("addmoder", "мод"))
 async def cmd_addmoder(message: Message):
-    """Выдать модератора (роль 1)"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     await db.set_user_role(target, message.chat.id, 1)
     await message.answer(f"✅ {await mention(target)} теперь Младший модератор (1)", parse_mode="HTML")
 
 
 @router.message(Command("removerole", "снятьроль"))
 async def cmd_removerole(message: Message):
-    """Снять роль"""
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     target_role = await get_role(target, message.chat.id)
     if target_role >= my_role:
         await message.reply("❌ Нельзя снять роль у этого пользователя!")
         return
-
     await db.set_user_role(target, message.chat.id, 0)
     await message.answer(f"✅ Роль снята: {await mention(target)}", parse_mode="HTML")
 
 
 @router.message(Command("addadmin"))
 async def cmd_addadmin(message: Message):
-    """Выдать админа (роль 3)"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 7:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     await db.set_user_role(target, message.chat.id, 3)
     await message.answer(f"✅ {await mention(target)} теперь Старший модератор (3)", parse_mode="HTML")
 
 
 @router.message(Command("addsenadmin", "senadm"))
 async def cmd_addsenadmin(message: Message):
-    """Выдать ст. админа (роль 5)"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 7:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split()
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
         return
-
     await db.set_user_role(target, message.chat.id, 5)
-    await message.answer(f"✅ {await mention(target)} теперь Технический специалист (5)", parse_mode="HTML")
+    await message.answer(f"✅ {await mention(target)} теперь Тех. специалист (5)", parse_mode="HTML")
 
 
 @router.message(Command("addstaff"))
 async def cmd_addstaff(message: Message):
-    """
-    Добавить в глобальную команду.
-    Использование: /addstaff @username роль
-    """
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1849,8 +1663,7 @@ async def cmd_addstaff(message: Message):
     args = message.text.split()
     if len(args) < 3:
         await message.reply(
-            "❌ Использование: /addstaff @username роль\n\n"
-            "<b>Роли:</b> 1-10\n"
+            "❌ Использование: /addstaff @username роль\n"
             "<b>Пример:</b> /addstaff @username 5",
             parse_mode="HTML"
         )
@@ -1867,19 +1680,15 @@ async def cmd_addstaff(message: Message):
         await message.reply("❌ Некорректная роль!")
         return
 
-    # Резолвим username в user_id
     target_id = await resolve_username(username)
     if not target_id:
-        await message.reply(
-            f"❌ Пользователь @{username} не найден.\n"
-            f"Попросите его написать боту /start в ЛС или отправить сообщение в группу."
-        )
+        await message.reply(f"❌ Пользователь @{username} не найден!")
         return
 
     await db.set_global_role(target_id, new_role, username)
     await message.answer(
-        f"✅ Добавлен в команду\n\n"
-        f"<b>Кто:</b> @{username} (ID: <code>{target_id}</code>)\n"
+        f"✅ Добавлен в команду\n"
+        f"<b>Кто:</b> @{username} (<code>{target_id}</code>)\n"
         f"<b>Роль:</b> {ROLE_NAMES.get(new_role)} ({new_role})",
         parse_mode="HTML"
     )
@@ -1887,13 +1696,7 @@ async def cmd_addstaff(message: Message):
 
 @router.message(Command("removestaff"))
 async def cmd_removestaff(message: Message):
-    """Удалить из команды"""
-    caller_id = await get_caller_id(message)
-    if not caller_id:
-        await message.reply("❌ Не удалось определить вас.")
-        return
-
-    my_role = await get_role(caller_id, message.chat.id)
+    my_role = await get_caller_role(message)
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1904,8 +1707,6 @@ async def cmd_removestaff(message: Message):
         return
 
     username = args[1].lstrip("@")
-
-    # Резолвим
     target_id = await resolve_username(username)
     if not target_id:
         await message.reply("❌ Пользователь не найден")
@@ -1926,9 +1727,7 @@ async def cmd_removestaff(message: Message):
 
 @router.message(Command("welcome", "приветствие", "wtext"))
 async def cmd_welcome(message: Message):
-    """Установить приветствие"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
@@ -1937,13 +1736,8 @@ async def cmd_welcome(message: Message):
     if len(args) < 2:
         current = await db.get_welcome(message.chat.id)
         await message.reply(
-            f"<b>Текущее приветствие:</b>\n{current or 'Не установлено'}\n\n"
-            f"<b>Переменные:</b>\n"
-            f"%name% — имя\n"
-            f"%fullname% — полное имя\n"
-            f"%mention% — упоминание\n"
-            f"%username% — @username\n"
-            f"%id% — ID\n\n"
+            f"<b>Текущее:</b>\n{current or 'Не установлено'}\n\n"
+            f"<b>Переменные:</b> %name%, %fullname%, %mention%, %username%, %id%\n"
             f"<b>Установить:</b> /welcome Привет, %name%!\n"
             f"<b>Удалить:</b> /welcome off",
             parse_mode="HTML"
@@ -1961,45 +1755,36 @@ async def cmd_welcome(message: Message):
 
 @router.message(Command("quiet", "тишина", "silence"))
 async def cmd_quiet(message: Message):
-    """Режим тишины"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-
     enabled = await db.toggle_silence(message.chat.id)
     if enabled:
-        await message.answer("🔇 Режим тишины <b>включён</b>\nСообщения от пользователей без роли будут удаляться", parse_mode="HTML")
+        await message.answer("🔇 Режим тишины <b>включён</b>", parse_mode="HTML")
     else:
         await message.answer("🔊 Режим тишины <b>выключен</b>", parse_mode="HTML")
 
 
 @router.message(Command("antiflood", "антифлуд"))
 async def cmd_antiflood(message: Message):
-    """Антифлуд"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-
     enabled = await db.toggle_antiflood(message.chat.id)
     if enabled:
-        await message.answer("🛡 Антифлуд <b>включён</b>\nСпамеры будут автоматически замучены", parse_mode="HTML")
+        await message.answer("🛡 Антифлуд <b>включён</b>", parse_mode="HTML")
     else:
         await message.answer("🛡 Антифлуд <b>выключен</b>", parse_mode="HTML")
 
 
 @router.message(Command("filter", "фильтр"))
 async def cmd_filter(message: Message):
-    """Фильтр слов"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-
     enabled = await db.toggle_filter(message.chat.id)
     if enabled:
         await message.answer("🔠 Фильтр слов <b>включён</b>", parse_mode="HTML")
@@ -2009,18 +1794,14 @@ async def cmd_filter(message: Message):
 
 @router.message(Command("banword", "запретить"))
 async def cmd_banword(message: Message):
-    """Добавить запрещённое слово"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите слово: /banword слово")
         return
-
     word = args[1].lower()
     await db.add_banword(message.chat.id, word)
     await message.answer(f"✅ Слово «{word}» запрещено")
@@ -2028,18 +1809,14 @@ async def cmd_banword(message: Message):
 
 @router.message(Command("unbanword", "разрешить"))
 async def cmd_unbanword(message: Message):
-    """Удалить из запрещённых"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите слово!")
         return
-
     word = args[1].lower()
     await db.remove_banword(message.chat.id, word)
     await message.answer(f"✅ Слово «{word}» разрешено")
@@ -2047,55 +1824,44 @@ async def cmd_unbanword(message: Message):
 
 @router.message(Command("banwords", "bws", "запрещённые"))
 async def cmd_banwords(message: Message):
-    """Список запрещённых слов"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-
     words = await db.get_banwords(message.chat.id)
     if not words:
         await message.answer("📋 Запрещённых слов нет")
         return
-
-    await message.answer(f"🚫 <b>Запрещённые слова:</b>\n{', '.join(words)}", parse_mode="HTML")
+    await message.answer(f"🚫 <b>Запрещённые:</b>\n{', '.join(words)}", parse_mode="HTML")
 
 
 @router.message(Command("zov", "зов"))
 async def cmd_zov(message: Message):
-    """Упомянуть всех"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split(maxsplit=1)
     reason = args[1] if len(args) > 1 else "Вызов"
-
+    caller_id = await get_caller_id_safe(message)
     await message.answer(
         f"📣 <b>Внимание всем участникам!</b>\n\n"
         f"<b>Причина:</b> {reason}\n"
-        f"<b>Вызвал:</b> {await mention(caller_id) if caller_id else 'Администратор'}",
+        f"<b>Вызвал:</b> {await mention(caller_id)}",
         parse_mode="HTML"
     )
 
 
 @router.message(Command("broadcast", "рассылка"))
 async def cmd_broadcast(message: Message):
-    """Рассылка по всем чатам"""
-    caller_id = await get_caller_id(message)
-    my_role = await get_role(caller_id, message.chat.id) if caller_id else 0
+    my_role = await get_caller_role(message)
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
-
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите текст: /broadcast текст")
         return
-
     text = args[1]
     chats = await db.get_all_chats()
     sent = 0
@@ -2105,27 +1871,19 @@ async def cmd_broadcast(message: Message):
             sent += 1
         except Exception:
             pass
-
     await message.answer(f"✅ Отправлено в {sent} чатов")
 
 
-# =============================================================================
-# ТОП ПОЛЬЗОВАТЕЛЕЙ
-# =============================================================================
-
 @router.message(Command("top", "топ"))
 async def cmd_top(message: Message):
-    """Топ по сообщениям"""
     top_users = await db.get_top_users(message.chat.id, 10)
     if not top_users:
-        await message.answer("📋 Нет данных о сообщениях")
+        await message.answer("📋 Нет данных")
         return
-
     text = "🏆 <b>Топ по сообщениям</b>\n\n"
     for i, (user_id, count) in enumerate(top_users, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        text += f"{medal} {await mention(user_id, message.chat.id)} — {count} сообщений\n"
-
+        text += f"{medal} {await mention(user_id, message.chat.id)} — {count}\n"
     await message.answer(text, parse_mode="HTML")
 
 
@@ -2135,34 +1893,32 @@ async def cmd_top(message: Message):
 
 @router.message(F.chat.type.in_([ChatType.GROUP, ChatType.SUPERGROUP]))
 async def on_message(message: Message):
-    """Обработка всех сообщений в группах"""
     if not message.from_user:
         return
 
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    # Пропускаем анонимного бота (это админ группы или GroupAnonymousBot)
-    if is_anonymous(user_id):
-        # Регистрируем чат, но не обрабатываем фильтры
-        await db.register_chat(chat_id, message.chat.title or "")
-        return
-
     # Регистрация чата
     await db.register_chat(chat_id, message.chat.title or "")
+
+    # Анонимный бот — пропускаем фильтры
+    if user_id == ANONYMOUS_BOT_ID:
+        return
 
     # Кэширование username
     if message.from_user.username:
         await db.cache_username(user_id, message.from_user.username)
+        # Проверяем отложенную роль
+        await db.apply_pending_staff(user_id, message.from_user.username)
 
     # Записываем сообщение
     if message.message_id:
         await db.add_message(user_id, chat_id, message.message_id)
 
-    # Получаем роль
     role = await get_role(user_id, chat_id)
 
-    # Режим тишины (удаляем сообщения от пользователей без роли)
+    # Режим тишины
     if await db.is_silence(chat_id) and role < 1:
         try:
             await message.delete()
@@ -2179,11 +1935,11 @@ async def on_message(message: Message):
             pass
         return
 
-    # Антифлуд (только для пользователей без роли)
+    # Антифлуд
     if role < 1 and await db.is_antiflood(chat_id):
         if await db.check_spam(user_id, chat_id, SPAM_INTERVAL, SPAM_COUNT):
-            until = int(time.time()) + 1800  # 30 минут
-            await db.add_mute(user_id, chat_id, 0, "Антифлуд: спам", until)
+            until = int(time.time()) + 1800
+            await db.add_mute(user_id, chat_id, 0, "Антифлуд", until)
             try:
                 await bot.restrict_chat_member(
                     chat_id, user_id,
@@ -2193,14 +1949,14 @@ async def on_message(message: Message):
                 await message.delete()
                 await bot.send_message(
                     chat_id,
-                    f"🔇 {await mention(user_id)} получил мут на 30 мин за спам",
+                    f"🔇 {await mention(user_id)} замучен на 30 мин за спам",
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
             return
 
-    # Фильтр запрещённых слов (только для пользователей без роли)
+    # Фильтр слов
     if role < 1 and message.text and await db.is_filter(chat_id):
         banwords = await db.get_banwords(chat_id)
         text_lower = message.text.lower()
@@ -2217,7 +1973,7 @@ async def on_message(message: Message):
                     )
                     await bot.send_message(
                         chat_id,
-                        f"🔇 {await mention(user_id)} получил мут на 30 мин за запрещённое слово",
+                        f"🔇 {await mention(user_id)} замучен за запрещённое слово",
                         parse_mode="HTML"
                     )
                 except Exception:
@@ -2231,20 +1987,16 @@ async def on_message(message: Message):
 
 @router.callback_query(F.data.startswith("qmute:"))
 async def cb_quick_mute(call: CallbackQuery):
-    """Быстрый мут на 30 минут"""
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
-
     role = await get_role(call.from_user.id, chat_id)
     if role < 1:
         await call.answer("Недостаточно прав!", show_alert=True)
         return
-
     target_role = await get_role(target, chat_id)
     if target_role >= role:
-        await call.answer("Нельзя замутить этого пользователя!", show_alert=True)
+        await call.answer("Нельзя замутить!", show_alert=True)
         return
-
     until = int(time.time()) + 1800
     try:
         await bot.restrict_chat_member(
@@ -2253,7 +2005,7 @@ async def cb_quick_mute(call: CallbackQuery):
             until_date=timedelta(minutes=30)
         )
         await db.add_mute(target, chat_id, call.from_user.id, "Быстрый мут", until)
-        await call.answer("✅ Мут на 30 минут!", show_alert=True)
+        await call.answer("✅ Мут 30 мин!", show_alert=True)
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
 
@@ -2270,20 +2022,21 @@ async def main():
     logger.info("🔵 Модерация Анонимные сообщения | Георгиевка")
     logger.info("Инициализация...")
 
-    # Инициализация команды из конфига
     await init_staff()
 
-    # Регистрация чатов из конфига
     for chat_id in MODERATED_CHATS:
         try:
             chat = await bot.get_chat(chat_id)
             await db.register_chat(chat_id, chat.title or "")
-            logger.info(f"Registered chat: {chat_id} ({chat.title})")
+            logger.info(f"Чат зарегистрирован: {chat_id} ({chat.title})")
         except Exception as e:
-            logger.warning(f"Could not register chat {chat_id}: {e}")
+            logger.warning(f"Ошибка регистрации чата {chat_id}: {e}")
+
+    # Регистрируем меню команд
+    await register_commands()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен!")
+    logger.info("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 
