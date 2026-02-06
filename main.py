@@ -96,6 +96,42 @@ def is_anon(message: Message) -> bool:
     return False
 
 
+def get_args(message: Message, maxsplit: int = -1) -> list:
+    """
+    Получить аргументы команды, убирая @botusername если он есть.
+    Например: '/stats@mybot @user' -> ['/stats', '@user']
+    
+    Args:
+        message: Сообщение с командой
+        maxsplit: Максимальное количество разделений (-1 = без ограничений)
+    """
+    if not message.text:
+        return []
+    
+    text = message.text
+    parts = text.split(maxsplit=1)
+    
+    if not parts:
+        return []
+    
+    # Убираем @botusername из команды если он есть
+    # Например: /stats@mybot -> /stats
+    command = parts[0]
+    if '@' in command:
+        command = command.split('@')[0]
+    
+    # Пересобираем текст без @botusername
+    if len(parts) > 1:
+        clean_text = command + ' ' + parts[1]
+    else:
+        clean_text = command
+    
+    # Применяем maxsplit если указан
+    if maxsplit >= 0:
+        return clean_text.split(maxsplit=maxsplit)
+    return clean_text.split()
+
+
 async def get_caller_role(message: Message) -> int:
     """
     Получить роль вызывающего команду.
@@ -536,7 +572,7 @@ async def cmd_help(message: Message):
 
 @router.message(Command("id", "ид", "getid"))
 async def cmd_id(message: Message):
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
 
     if not target:
@@ -560,7 +596,7 @@ async def cmd_id(message: Message):
 
 @router.message(Command("stats", "стата", "статистика"))
 async def cmd_stats(message: Message):
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
 
     if not target:
@@ -689,7 +725,7 @@ async def cmd_staff(message: Message):
 
 @router.message(Command("reg", "registration", "регистрация"))
 async def cmd_reg(message: Message):
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         target = message.from_user.id if message.from_user and not is_anon(message) else 0
@@ -719,7 +755,7 @@ async def cmd_mute(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply(
@@ -799,7 +835,7 @@ async def cmd_unmute(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -839,7 +875,7 @@ async def cmd_getmute(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -894,7 +930,7 @@ async def cmd_warn(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -945,7 +981,7 @@ async def cmd_unwarn(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -983,7 +1019,7 @@ async def cmd_getwarn(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1015,7 +1051,7 @@ async def cmd_warnhistory(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1078,7 +1114,7 @@ async def cmd_ban(message: Message):
         await message.reply("❌ Недостаточно прав! Нужен уровень 3+")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1120,7 +1156,7 @@ async def cmd_unban(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1160,7 +1196,7 @@ async def cmd_getban(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1243,7 +1279,7 @@ async def cmd_kick(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1282,7 +1318,7 @@ async def cmd_setnick(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1312,7 +1348,7 @@ async def cmd_removenick(message: Message):
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1323,7 +1359,7 @@ async def cmd_removenick(message: Message):
 
 @router.message(Command("getnick", "gnick", "гетник"))
 async def cmd_getnick(message: Message):
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         if is_anon(message):
@@ -1345,7 +1381,7 @@ async def cmd_getacc(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split(maxsplit=1)
+    args = get_args(message, maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите ник!")
         return
@@ -1403,7 +1439,7 @@ async def cmd_gban(message: Message):
         await message.reply("❌ Недостаточно прав! Нужен уровень 9+")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1445,7 +1481,7 @@ async def cmd_gunban(message: Message):
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1502,7 +1538,7 @@ async def cmd_clear(message: Message):
     if my_role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1553,7 +1589,7 @@ async def cmd_setrole(message: Message):
         await message.reply("❌ Недостаточно прав! Нужен уровень 5+")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1595,7 +1631,7 @@ async def cmd_addmoder(message: Message):
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1610,7 +1646,7 @@ async def cmd_removerole(message: Message):
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1629,7 +1665,7 @@ async def cmd_addadmin(message: Message):
     if my_role < 7:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1644,7 +1680,7 @@ async def cmd_addsenadmin(message: Message):
     if my_role < 7:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split()
+    args = get_args(message)
     target = await parse_user(message, args, 1)
     if not target:
         await message.reply("❌ Укажите пользователя!")
@@ -1660,7 +1696,7 @@ async def cmd_addstaff(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     if len(args) < 3:
         await message.reply(
             "❌ Использование: /addstaff @username роль\n"
@@ -1701,7 +1737,7 @@ async def cmd_removestaff(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split()
+    args = get_args(message)
     if len(args) < 2:
         await message.reply("❌ Использование: /removestaff @username")
         return
@@ -1732,7 +1768,7 @@ async def cmd_welcome(message: Message):
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = message.text.split(maxsplit=1)
+    args = get_args(message, maxsplit=1)
     if len(args) < 2:
         current = await db.get_welcome(message.chat.id)
         await message.reply(
@@ -1798,7 +1834,7 @@ async def cmd_banword(message: Message):
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split(maxsplit=1)
+    args = get_args(message, maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите слово: /banword слово")
         return
@@ -1813,7 +1849,7 @@ async def cmd_unbanword(message: Message):
     if my_role < 5:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split(maxsplit=1)
+    args = get_args(message, maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите слово!")
         return
@@ -1841,7 +1877,7 @@ async def cmd_zov(message: Message):
     if my_role < 3:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split(maxsplit=1)
+    args = get_args(message, maxsplit=1)
     reason = args[1] if len(args) > 1 else "Вызов"
     caller_id = await get_caller_id_safe(message)
     await message.answer(
@@ -1858,7 +1894,7 @@ async def cmd_broadcast(message: Message):
     if my_role < 9:
         await message.reply("❌ Недостаточно прав!")
         return
-    args = message.text.split(maxsplit=1)
+    args = get_args(message, maxsplit=1)
     if len(args) < 2:
         await message.reply("❌ Укажите текст: /broadcast текст")
         return
