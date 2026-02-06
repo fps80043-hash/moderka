@@ -231,16 +231,24 @@ async def parse_user(message: Message, args: list, start_idx: int = 1) -> Option
     """
     Парсер пользователя:
     1. Реплай (не на анонима)
-    2. @username
-    3. Числовой ID
-    4. Ник в чате
-    5. Username без @
+    2. Forward (пересланное сообщение)
+    3. @username
+    4. Числовой ID
+    5. Ник в чате
+    6. Username без @
     """
     # 1. Реплай
     if message.reply_to_message:
         reply = message.reply_to_message
+        # Проверяем от кого сообщение
         if reply.from_user and reply.from_user.id != ANONYMOUS_BOT_ID:
             user = reply.from_user
+            if user.username:
+                await db.cache_username(user.id, user.username)
+            return user.id
+        # Проверяем forward_from (пересланное от пользователя)
+        if reply.forward_from and reply.forward_from.id != ANONYMOUS_BOT_ID:
+            user = reply.forward_from
             if user.username:
                 await db.cache_username(user.id, user.username)
             return user.id
@@ -255,9 +263,20 @@ async def parse_user(message: Message, args: list, start_idx: int = 1) -> Option
     if arg.lstrip('-').isdigit():
         return int(arg)
 
-    # @username
+    # @username - сначала проверяем кэш
     if arg.startswith('@'):
-        return await resolve_username(arg[1:])
+        username = arg[1:].lower()
+        # Проверяем кэш
+        cached = await db.get_user_by_username(username)
+        if cached:
+            return cached
+        # Пытаемся через API
+        resolved = await resolve_username(username)
+        if resolved:
+            return resolved
+        # Не нашли - сообщаем пользователю
+        logger.warning(f"Не удалось найти пользователя @{username}")
+        return None
 
     # Ник в чате
     if message.chat.id:
@@ -265,7 +284,13 @@ async def parse_user(message: Message, args: list, start_idx: int = 1) -> Option
         if by_nick:
             return by_nick
 
-    # Username без @
+    # Username без @ - сначала кэш
+    username_lower = arg.lower()
+    cached = await db.get_user_by_username(username_lower)
+    if cached:
+        return cached
+    
+    # Пытаемся через API
     return await resolve_username(arg)
 
 
@@ -371,6 +396,7 @@ async def register_commands():
     group_commands = [
         BotCommand(command="help", description="📋 Команды бота"),
         BotCommand(command="id", description="🆔 Узнать ID"),
+        BotCommand(command="mod", description="🛡 Панель модерации"),
         BotCommand(command="stats", description="📊 Статистика пользователя"),
         BotCommand(command="mystatus", description="👤 Мой статус"),
         BotCommand(command="staff", description="👥 Состав команды"),
@@ -513,6 +539,7 @@ async def cmd_help(message: Message):
 
     if role >= 1:
         text += "<b>🛡 Модератор (1-2):</b>\n"
+        text += "/mod @user — панель модерации с кнопками\n"
         text += "/mute @user 30m причина — мут\n"
         text += "/unmute @user — снять мут\n"
         text += "/warn @user причина — варн\n"
@@ -592,6 +619,102 @@ async def cmd_id(message: Message):
     if info['username']:
         text += f"<b>Username:</b> @{info['username']}"
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("mod", "модер", "moderate"))
+async def cmd_mod(message: Message):
+    """Панель быстрой модерации с инлайн-кнопками"""
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply("❌ Команда работает только в группах!")
+        return
+
+    my_role = await get_caller_role(message)
+    if my_role < 1:
+        await message.reply("❌ Недостаточно прав!")
+        return
+
+    args = get_args(message)
+    target = await parse_user(message, args, 1)
+
+    if not target:
+        await message.reply(
+            "❌ Укажите пользователя!\n\n"
+            "<b>Использование:</b>\n"
+            "• /mod (реплай на сообщение)\n"
+            "• /mod @username\n"
+            "• /mod ID",
+            parse_mode="HTML"
+        )
+        return
+
+    target_role = await get_role(target, message.chat.id)
+    caller_id = await get_caller_id_safe(message)
+
+    # Проверка прав
+    if target == caller_id:
+        await message.reply("❌ Нельзя модерировать самого себя!")
+        return
+
+    if target_role >= my_role:
+        await message.reply("❌ Нельзя модерировать этого пользователя (роль выше или равна вашей)!")
+        return
+
+    # Получаем информацию о пользователе
+    info = await get_user_info(target)
+    warns = await db.get_warns_count(target, message.chat.id)
+    nick = await db.get_nick(target, message.chat.id)
+    msg_count = await db.get_message_count(target, message.chat.id)
+    mute = await db.get_mute(target, message.chat.id)
+    ban = await db.get_ban(target, message.chat.id)
+
+    text = f"🛡 <b>Панель модерации</b>\n\n"
+    text += f"<b>Пользователь:</b> {await mention(target, message.chat.id)}\n"
+    text += f"<b>ID:</b> <code>{target}</code>\n"
+    if info['username']:
+        text += f"<b>Username:</b> @{info['username']}\n"
+    if nick:
+        text += f"<b>Ник:</b> {nick}\n"
+    text += f"<b>Роль:</b> {ROLE_NAMES.get(target_role, '?')} ({target_role})\n"
+    text += f"<b>Варнов:</b> {warns}/{MAX_WARNS}\n"
+    text += f"<b>Сообщений:</b> {msg_count}\n"
+
+    if mute and mute.get('until', 0) > time.time():
+        text += f"\n🔇 <b>Замучен до:</b> {format_dt(mute['until'])}"
+
+    if ban:
+        text += f"\n🚫 <b>Забанен:</b> {ban.get('reason', '-')}"
+
+    # Создаём кнопки модерации
+    kb = InlineKeyboardBuilder()
+    chat_id = message.chat.id
+
+    # Первый ряд - варн и мут
+    if my_role >= 1:
+        kb.button(text="⚠️ Варн", callback_data=f"quickwarn:{target}:{chat_id}")
+        kb.button(text="🔇 Мут 30м", callback_data=f"qmute:{target}:{chat_id}")
+
+    # Второй ряд - kick и ban
+    if my_role >= 1:
+        kb.button(text="👢 Кик", callback_data=f"quickkick:{target}:{chat_id}")
+    if my_role >= 3:
+        kb.button(text="🚫 Бан", callback_data=f"quickban:{target}:{chat_id}")
+
+    # Третий ряд - снятие наказаний (если есть)
+    if warns > 0 and my_role >= 1:
+        kb.button(text="✅ Снять варн", callback_data=f"unwarn:{target}:{chat_id}")
+    if mute and mute.get('until', 0) > time.time() and my_role >= 1:
+        kb.button(text="🔊 Размут", callback_data=f"unmute:{target}:{chat_id}")
+    if ban and my_role >= 3:
+        kb.button(text="✅ Разбан", callback_data=f"unban:{target}:{chat_id}")
+
+    # Четвёртый ряд - дополнительно
+    if my_role >= 1:
+        kb.button(text="📜 История варнов", callback_data=f"wh:{target}:{chat_id}")
+        kb.button(text="🧹 Очистить сообщения", callback_data=f"quickclear:{target}:{chat_id}")
+
+    kb.adjust(2, 2, 2, 2)
+
+    await message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
 @router.message(Command("stats", "стата", "статистика"))
@@ -2044,6 +2167,151 @@ async def cb_quick_mute(call: CallbackQuery):
         await call.answer("✅ Мут 30 мин!", show_alert=True)
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickwarn:"))
+async def cb_quick_warn(call: CallbackQuery):
+    """Быстрый варн через инлайн-кнопку"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    role = await get_role(call.from_user.id, chat_id)
+    
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+    
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя выдать варн!", show_alert=True)
+        return
+    
+    try:
+        warns = await db.add_warn(target, chat_id, call.from_user.id, "Быстрый варн")
+        
+        if warns >= MAX_WARNS:
+            # Кик за превышение варнов
+            await bot.ban_chat_member(chat_id, target)
+            await asyncio.sleep(0.5)
+            await bot.unban_chat_member(chat_id, target)
+            await db.clear_warns(target, chat_id)
+            await call.answer(f"⚠️ Варн выдан! Пользователь кикнут за {MAX_WARNS} варна.", show_alert=True)
+            
+            # Обновляем сообщение
+            await call.message.edit_text(
+                f"{call.message.text}\n\n👢 <b>Кикнут за {MAX_WARNS} варна!</b>",
+                parse_mode="HTML"
+            )
+        else:
+            await call.answer(f"✅ Варн выдан! Всего: {warns}/{MAX_WARNS}", show_alert=True)
+            # Можно обновить кнопки если нужно
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickkick:"))
+async def cb_quick_kick(call: CallbackQuery):
+    """Быстрый кик через инлайн-кнопку"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    role = await get_role(call.from_user.id, chat_id)
+    
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+    
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя кикнуть!", show_alert=True)
+        return
+    
+    try:
+        await bot.ban_chat_member(chat_id, target)
+        await asyncio.sleep(0.5)
+        await bot.unban_chat_member(chat_id, target)
+        await call.answer("✅ Кикнут!", show_alert=True)
+        
+        # Обновляем сообщение
+        await call.message.edit_text(
+            f"{call.message.text}\n\n👢 <b>Кикнут модератором</b> {await mention(call.from_user.id)}",
+            parse_mode="HTML",
+            reply_markup=None
+        )
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickban:"))
+async def cb_quick_ban(call: CallbackQuery):
+    """Быстрый бан через инлайн-кнопку"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    role = await get_role(call.from_user.id, chat_id)
+    
+    if role < 3:
+        await call.answer("❌ Недостаточно прав! Нужен уровень 3+", show_alert=True)
+        return
+    
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя забанить!", show_alert=True)
+        return
+    
+    try:
+        await bot.ban_chat_member(chat_id, target)
+        await db.add_ban(target, chat_id, call.from_user.id, "Быстрый бан")
+        await call.answer("✅ Забанен!", show_alert=True)
+        
+        # Обновляем сообщение
+        await call.message.edit_text(
+            f"{call.message.text}\n\n🚫 <b>Забанен модератором</b> {await mention(call.from_user.id)}",
+            parse_mode="HTML",
+            reply_markup=None
+        )
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickclear:"))
+async def cb_quick_clear(call: CallbackQuery):
+    """Быстрая очистка сообщений через инлайн-кнопку"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    role = await get_role(call.from_user.id, chat_id)
+    
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+    
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя очистить сообщения!", show_alert=True)
+        return
+    
+    await call.answer("🧹 Очистка последних 10 сообщений...", show_alert=False)
+    
+    # Очищаем последние 10 сообщений
+    deleted = 0
+    try:
+        # Получаем ID текущего сообщения
+        current_msg_id = call.message.message_id
+        
+        # Пытаемся удалить последние 10 сообщений назад
+        for i in range(1, 11):
+            try:
+                await bot.delete_message(chat_id, current_msg_id - i)
+                deleted += 1
+                await asyncio.sleep(0.3)  # Небольшая задержка чтобы не словить rate limit
+            except Exception:
+                pass
+        
+        await call.message.edit_text(
+            f"{call.message.text}\n\n🧹 <b>Очищено {deleted} сообщений</b>",
+            parse_mode="HTML",
+            reply_markup=None
+        )
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
 
 
 # =============================================================================
