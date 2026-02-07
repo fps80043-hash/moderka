@@ -1,6 +1,11 @@
 """
 🔵 Модерация Анонимные сообщения | Георгиевка
-Telegram бот для модерации групп - ВЕРСИЯ 4 (ПОЛНЫЙ ФИКс)
+Telegram бот для модерации групп - ВЕРСИЯ 4.1 (ПОЛНЫЙ ФИКс)
+
+Обновления v4.1:
+- Команда /ro теперь работает для всего чата (кроме staff)
+- Команда /unro снимает режим RO для всего чата
+- Staff может писать даже в режиме RO
 
 Обновления v4:
 - preset_staff работает по ID вместо username
@@ -357,7 +362,7 @@ async def register_commands():
         BotCommand(command="ban", description="🚫 Забанить пользователя"),
         BotCommand(command="unban", description="✅ Разбанить пользователя"),
         BotCommand(command="kick", description="👢 Кикнуть пользователя"),
-        BotCommand(command="ro", description="👁 Режим только чтение"),
+        BotCommand(command="ro", description="👁 Режим RO для чата"),
         BotCommand(command="unro", description="✍️ Снять режим RO"),
         BotCommand(command="setnick", description="📝 Установить ник"),
         BotCommand(command="clear", description="🧹 Очистить сообщения"),
@@ -436,8 +441,8 @@ async def cmd_help(message: Message):
         "• /ban @user - бан (выбор времени)\n"
         "• /unban @user - разбанить\n"
         "• /kick @user [причина] - кикнуть\n"
-        "• /ro @user - режим только чтение\n"
-        "• /unro @user - снять RO\n\n"
+        "• /ro - режим RO для всего чата (кроме staff)\n"
+        "• /unro - снять режим RO\n\n"
         "<b>Глобальные команды (7+):</b>\n"
         "• /gban @user [причина] - глобальный бан\n"
         "• /ungban @user - снять глобальный бан\n\n"
@@ -932,64 +937,56 @@ async def cmd_kick(message: Message):
 
 
 # =============================================================================
-# КОМАНДА - RO/UNRO
+# КОМАНДА - RO/UNRO (РЕЖИМ ТОЛЬКО ЧТЕНИЕ ДЛЯ ВСЕГО ЧАТА)
 # =============================================================================
 
 @router.message(Command("ro"))
 async def cmd_ro(message: Message):
-    """Режим только чтение"""
+    """Включить режим только чтение для всего чата (кроме staff)"""
     role = await get_caller_role(message)
     if role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = get_args(message)
-    target = await parse_user(message, args)
-
-    if not target:
-        await message.reply("❌ Укажите пользователя: /ro @user")
-        return
-
-    target_role = await get_role(target, message.chat.id)
-    if target_role >= role:
-        await message.reply("❌ Нельзя установить RO!")
-        return
-
+    chat_id = message.chat.id
+    
     try:
-        await bot.restrict_chat_member(
-            message.chat.id, target,
-            permissions=readonly_permissions()
-        )
+        # Включаем режим RO в базе
+        await db.set_ro_mode(chat_id, True)
         
-        target_name = await mention(target, message.chat.id)
-        await message.answer(f"👁 {target_name} переведен в режим только чтение!", parse_mode="HTML")
+        await message.answer(
+            "👁 <b>Режим только чтение включен!</b>\n\n"
+            "Обычные пользователи не могут отправлять сообщения.\n"
+            "Staff может продолжать работу.",
+            parse_mode="HTML"
+        )
+        logger.info(f"Режим RO включен в чате {chat_id}")
+        
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
 
 @router.message(Command("unro"))
 async def cmd_unro(message: Message):
-    """Снять RO"""
+    """Выключить режим только чтение"""
     role = await get_caller_role(message)
     if role < 1:
         await message.reply("❌ Недостаточно прав!")
         return
 
-    args = get_args(message)
-    target = await parse_user(message, args)
-
-    if not target:
-        await message.reply("❌ Укажите пользователя: /unro @user")
-        return
-
+    chat_id = message.chat.id
+    
     try:
-        await bot.restrict_chat_member(
-            message.chat.id, target,
-            permissions=full_permissions()
-        )
+        # Выключаем режим RO в базе
+        await db.set_ro_mode(chat_id, False)
         
-        target_name = await mention(target, message.chat.id)
-        await message.answer(f"✍️ {target_name} снят режим RO!", parse_mode="HTML")
+        await message.answer(
+            "✍️ <b>Режим только чтение выключен!</b>\n\n"
+            "Все пользователи могут отправлять сообщения.",
+            parse_mode="HTML"
+        )
+        logger.info(f"Режим RO выключен в чате {chat_id}")
+        
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -1425,6 +1422,20 @@ async def on_message(message: Message):
             pass
         return
 
+    # Проверка режима RO (только чтение для всего чата)
+    if role < 1 and await db.is_ro_mode(chat_id):
+        try:
+            await message.delete()
+            # Опционально: можно отправить предупреждение (закомментировано чтобы не спамить)
+            # await bot.send_message(
+            #     chat_id,
+            #     f"👁 Режим только чтение! {await mention(user_id)}",
+            #     parse_mode="HTML"
+            # )
+        except Exception:
+            pass
+        return
+
     # Антифлуд
     if role < 1 and await db.is_antiflood(chat_id):
         now = time.time()
@@ -1495,7 +1506,7 @@ async def main():
     db = Database("database.db")
     await db.init()
 
-    logger.info("🔵 Модерация Анонимные сообщения | Георгиевка v4")
+    logger.info("🔵 Модерация Анонимные сообщения | Георгиевка v4.1")
     logger.info("Инициализация...")
 
     await init_staff()

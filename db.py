@@ -576,6 +576,28 @@ class Database:
             row = await cur.fetchone()
             return bool(row['filter']) if row else False
 
+    async def set_ro_mode(self, chat_id: int, enabled: bool):
+        """Включить/выключить режим только чтение для всего чата"""
+        # Добавляем колонку ro_mode если её нет
+        try:
+            await self.db.execute("ALTER TABLE chats ADD COLUMN ro_mode INTEGER DEFAULT 0")
+            await self.db.commit()
+        except Exception:
+            pass  # Колонка уже существует
+        
+        await self.db.execute("UPDATE chats SET ro_mode = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
+        await self.db.commit()
+
+    async def is_ro_mode(self, chat_id: int) -> bool:
+        """Проверить включен ли режим только чтение"""
+        try:
+            async with self.db.execute("SELECT ro_mode FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+                row = await cur.fetchone()
+                return bool(row['ro_mode']) if row else False
+        except Exception:
+            # Если колонки нет, возвращаем False
+            return False
+
     # =========================================================================
     # BANWORDS
     # =========================================================================
