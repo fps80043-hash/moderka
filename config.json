@@ -1,21 +1,13 @@
 {
   "bot_token": "8310857029:AAFyoParxN3JA0vjGVWsqs7sGRSE22l8VpA",
   "moderated_chats": [
-    -1003724639162,
-    -1003748565891,
-    -1003839597579
+    -1001234567890
   ],
   "preset_staff": {
-    "Timo4ka115": 10,
-    "treshshshhh": 9,
-    "GashiSH40": 8,
-    "Wisnswiw":7,
-    "ishakbest": 6,
-    "":5,
-    "":4,
-    "":3,
-    "":2,
-    "":1
+    "5027253935": 10,
+    "5180464084": 8,
+    "7716828861": 7,
+    "982005638": 6
   },
   "max_warns": 3,
   "spam_interval_seconds": 2,
