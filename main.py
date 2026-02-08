@@ -1,6 +1,12 @@
 """
 🔵 Модерация Анонимные сообщения | Георгиевка
-Telegram бот для модерации групп - ВЕРСИЯ 5.0 (ЧИСТАЯ РЕАЛИЗАЦИЯ)
+Telegram бот для модерации групп - ВЕРСИЯ 5.1 (ИСПРАВЛЕНИЕ PARSE_USER)
+
+Исправления v5.1:
+- Добавлены логи для отладки parse_user
+- Улучшено сообщение об ошибке (показывает 3 способа указать пользователя)
+- Приоритет reply - можно ответить на сообщение пользователя
+- Лучшая обработка ошибок
 
 Основные возможности:
 - Полная система модерации с ролями (0-10)
@@ -194,33 +200,55 @@ async def resolve_username(username: str) -> Optional[int]:
     return None
 
 async def parse_user(message: Message, args: list, start_idx: int = 1) -> Optional[int]:
-    # Реплай
+    """Парсинг пользователя с логированием"""
+    # 1. Реплай (ПРИОРИТЕТ!)
     if message.reply_to_message:
         reply = message.reply_to_message
         if not is_anon(reply) and reply.from_user:
+            logger.debug(f"parse_user: Найден через reply -> {reply.from_user.id}")
             return reply.from_user.id
 
-    # Forward
+    # 2. Forward
     if message.forward_from:
+        logger.debug(f"parse_user: Найден через forward -> {message.forward_from.id}")
         return message.forward_from.id
 
-    # Из аргументов
+    # 3. Из аргументов
     if len(args) <= start_idx:
+        logger.debug(f"parse_user: Недостаточно аргументов. args={args}, start_idx={start_idx}")
         return None
 
     arg = args[start_idx].strip()
+    logger.info(f"parse_user: Парсинг аргумента '{arg}'")
 
+    # Username с @
     if arg.startswith("@"):
-        return await resolve_username(arg)
+        user_id = await resolve_username(arg)
+        if user_id:
+            logger.info(f"parse_user: Username '{arg}' -> {user_id}")
+        else:
+            logger.warning(f"parse_user: Username '{arg}' не найден!")
+        return user_id
     
+    # ID (только цифры)
     if arg.isdigit():
-        return int(arg)
+        user_id = int(arg)
+        logger.info(f"parse_user: ID '{arg}' -> {user_id}")
+        return user_id
 
+    # Ник в чате
     nick_user = await db.get_user_by_nick(arg, message.chat.id)
     if nick_user:
+        logger.info(f"parse_user: Ник '{arg}' -> {nick_user}")
         return nick_user
 
-    return await resolve_username(arg)
+    # Username без @
+    user_id = await resolve_username(arg)
+    if user_id:
+        logger.info(f"parse_user: Username без @ '{arg}' -> {user_id}")
+    else:
+        logger.warning(f"parse_user: '{arg}' не распознан")
+    return user_id
 
 def muted_permissions() -> ChatPermissions:
     return ChatPermissions(
@@ -519,12 +547,21 @@ async def cmd_warn(message: Message):
         return
 
     args = get_args(message, maxsplit=2)
+    logger.info(f"warn: args = {args}")
     target = await parse_user(message, args)
 
     if not target:
         await message.reply(
             "❌ <b>Не удалось определить пользователя</b>\n\n"
-            "<b>Использование:</b>\n<code>/warn @username [причина]</code>",
+            "<b>Способы указать пользователя:</b>\n"
+            "1️⃣ Ответить на его сообщение + /warn [причина]\n"
+            "2️⃣ /warn @username [причина]\n"
+            "3️⃣ /warn ID [причина]\n\n"
+            "<b>Примеры:</b>\n"
+            "• Ответьте на сообщение пользователя и напишите: <code>/warn спам</code>\n"
+            "• <code>/warn @username нарушение правил</code>\n"
+            "• <code>/warn 123456789 флуд</code>\n\n"
+            "💡 <i>Если username не работает - используйте reply!</i>",
             parse_mode="HTML"
         )
         return
@@ -535,6 +572,7 @@ async def cmd_warn(message: Message):
         return
 
     reason = args[2] if len(args) > 2 else "Нарушение правил"
+    logger.info(f"warn: target={target}, reason='{reason}'")
     caller_id = await get_caller_id_safe(message)
 
     builder = InlineKeyboardBuilder()
@@ -1522,7 +1560,7 @@ async def main():
     db = Database("database.db")
     await db.init()
 
-    logger.info("🔵 Модерация Анонимные сообщения | Георгиевка v5.0")
+    logger.info("🔵 Модерация Анонимные сообщения | Георгиевка v5.1")
     logger.info("Инициализация...")
 
     await init_staff()
