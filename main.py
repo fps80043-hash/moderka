@@ -1,6 +1,20 @@
 """
 🔵 Модерация Анонимные сообщения | Георгиевка
-Telegram бот для модерации групп - ВЕРСИЯ 4.1 (ПОЛНЫЙ ФИКс)
+Telegram бот для модерации групп - ВЕРСИЯ 4.3 (ПОЛНЫЙ ФИКс)
+
+Обновления v4.3:
+- Удалена команда /start из меню
+- Исправлена команда /help (теперь работает корректно)
+- Добавлены инлайн-кнопки быстрых действий ко ВСЕМ сообщениям бота
+- Кнопки: ⚠️ Варн, 🔇 Мут, 👢 Кик, 🚫 Бан, 📊 Статистика, 🧹 Очистить
+- Быстрые действия доступны прямо из кнопок под сообщениями
+
+Обновления v4.2:
+- Команды модерации скрыты от обычных пользователей (видят только базовые)
+- Улучшен парсинг команд (правильно обрабатывает причины с пробелами)
+- Добавлена отладочная информация для команд
+- Улучшены сообщения об ошибках (более понятные)
+- Команда /help показывает только доступные команды по роли
 
 Обновления v4.1:
 - Команда /ro теперь работает для всего чата (кроме staff)
@@ -106,11 +120,17 @@ def get_args(message: Message, maxsplit: int = -1) -> list:
     """
     Получить аргументы команды, убирая @botusername если он есть.
     Поддерживает команды с / ! и другими префиксами.
+    
+    Примеры:
+    '/gban@bot @user причина' -> ['/gban', '@user', 'причина']
+    '/warn @user' -> ['/warn', '@user']
     """
     if not message.text:
         return []
     
-    text = message.text
+    text = message.text.strip()
+    
+    # Разделяем команду от остального текста
     parts = text.split(maxsplit=1)
     
     if not parts:
@@ -121,7 +141,7 @@ def get_args(message: Message, maxsplit: int = -1) -> list:
     if '@' in command:
         command = command.split('@')[0]
     
-    # Пересобираем текст без @botusername
+    # Собираем обратно текст без @botusername
     if len(parts) > 1:
         clean_text = command + ' ' + parts[1]
     else:
@@ -129,8 +149,14 @@ def get_args(message: Message, maxsplit: int = -1) -> list:
     
     # Применяем maxsplit если указан
     if maxsplit >= 0:
-        return clean_text.split(maxsplit=maxsplit)
-    return clean_text.split()
+        result = clean_text.split(maxsplit=maxsplit)
+    else:
+        result = clean_text.split()
+    
+    # Отладка (можно закомментировать после тестирования)
+    # logger.debug(f"get_args: '{text}' -> {result}")
+    
+    return result
 
 
 async def get_caller_role(message: Message) -> int:
@@ -222,39 +248,66 @@ async def resolve_username(username: str) -> Optional[int]:
 
 
 async def parse_user(message: Message, args: list, start_idx: int = 1) -> Optional[int]:
-    """Парсер пользователя"""
+    """
+    Парсер пользователя с улучшенной обработкой
+    
+    Примеры:
+    - Реплай на сообщение
+    - Forward от пользователя
+    - @username
+    - Числовой ID
+    - Ник в чате
+    - Username без @
+    """
     # 1. Реплай
     if message.reply_to_message:
         reply = message.reply_to_message
         if not is_anon(reply):
             if reply.from_user:
+                logger.debug(f"parse_user: Найден через reply -> {reply.from_user.id}")
                 return reply.from_user.id
 
     # 2. Forward
     if message.forward_from:
+        logger.debug(f"parse_user: Найден через forward -> {message.forward_from.id}")
         return message.forward_from.id
 
     # 3-6. Из аргументов
     if len(args) <= start_idx:
+        logger.debug(f"parse_user: Недостаточно аргументов. args={args}, start_idx={start_idx}")
         return None
 
     arg = args[start_idx].strip()
+    logger.debug(f"parse_user: Парсинг аргумента '{arg}' из позиции {start_idx}")
 
-    # Username
+    # Username с @
     if arg.startswith("@"):
-        return await resolve_username(arg)
+        user_id = await resolve_username(arg)
+        if user_id:
+            logger.debug(f"parse_user: Username '{arg}' -> {user_id}")
+        else:
+            logger.debug(f"parse_user: Username '{arg}' не найден")
+        return user_id
 
-    # ID
+    # ID (только цифры)
     if arg.isdigit():
-        return int(arg)
+        user_id = int(arg)
+        logger.debug(f"parse_user: ID '{arg}' -> {user_id}")
+        return user_id
 
     # Ник в чате
     nick_user = await db.get_user_by_nick(arg, message.chat.id)
     if nick_user:
+        logger.debug(f"parse_user: Ник '{arg}' -> {nick_user}")
         return nick_user
 
     # Username без @
-    return await resolve_username(arg)
+    user_id = await resolve_username(arg)
+    if user_id:
+        logger.debug(f"parse_user: Username без @ '{arg}' -> {user_id}")
+    else:
+        logger.debug(f"parse_user: '{arg}' не распознан как username")
+    return user_id
 
 
 def muted_permissions() -> ChatPermissions:
@@ -344,46 +397,55 @@ def create_duration_keyboard(action: str, target_id: int, chat_id: int) -> Inlin
     return builder
 
 
+def create_quick_actions_keyboard(target_id: int, chat_id: int) -> InlineKeyboardBuilder:
+    """
+    Создать клавиатуру быстрых действий для сообщения
+    Эти кнопки появляются под сообщениями бота для быстрой модерации
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Первый ряд - основные действия
+    builder.button(text="⚠️ Варн", callback_data=f"quickwarn:{target_id}:{chat_id}")
+    builder.button(text="🔇 Мут", callback_data=f"quickmute:{target_id}:{chat_id}")
+    
+    # Второй ряд - серьезные действия
+    builder.button(text="👢 Кик", callback_data=f"quickkick:{target_id}:{chat_id}")
+    builder.button(text="🚫 Бан", callback_data=f"quickban:{target_id}:{chat_id}")
+    
+    # Третий ряд - дополнительные действия
+    builder.button(text="📊 Статистика", callback_data=f"quickstats:{target_id}:{chat_id}")
+    builder.button(text="🧹 Очистить", callback_data=f"quickclear:{target_id}:{chat_id}")
+    
+    builder.adjust(2)  # 2 кнопки в ряд
+    return builder
+
+
 # =============================================================================
 # РЕГИСТРАЦИЯ КОМАНД
 # =============================================================================
 
 async def register_commands():
     """Регистрация команд бота"""
-    # Команды для групп
-    group_commands = [
-        BotCommand(command="start", description="🚀 Запустить бота"),
-        BotCommand(command="help", description="❓ Помощь"),
-        BotCommand(command="stats", description="📊 Статистика пользователя"),
-        BotCommand(command="warn", description="⚠️ Выдать предупреждение"),
-        BotCommand(command="unwarn", description="✅ Снять предупреждение"),
-        BotCommand(command="mute", description="🔇 Замутить пользователя"),
-        BotCommand(command="unmute", description="🔊 Размутить пользователя"),
-        BotCommand(command="ban", description="🚫 Забанить пользователя"),
-        BotCommand(command="unban", description="✅ Разбанить пользователя"),
-        BotCommand(command="kick", description="👢 Кикнуть пользователя"),
-        BotCommand(command="ro", description="👁 Режим RO для чата"),
-        BotCommand(command="unro", description="✍️ Снять режим RO"),
-        BotCommand(command="setnick", description="📝 Установить ник"),
-        BotCommand(command="clear", description="🧹 Очистить сообщения"),
-        BotCommand(command="gban", description="🌐 Глобальный бан"),
-        BotCommand(command="ungban", description="🌐 Снять глобальный бан"),
-        BotCommand(command="setrole", description="⭐ Назначить роль"),
-        BotCommand(command="removerole", description="❌ Снять роль"),
-        BotCommand(command="staff", description="👥 Список команды"),
-    ]
-
-    # Команды для ЛС
-    private_commands = [
-        BotCommand(command="start", description="🚀 Запустить бота"),
+    
+    # Команды для обычных пользователей (что они видят в меню)
+    user_commands = [
         BotCommand(command="help", description="❓ Помощь"),
         BotCommand(command="stats", description="📊 Моя статистика"),
     ]
-
+    
+    # Команды для групп (полный список, но они будут скрыты по умолчанию)
+    # Мы не регистрируем их глобально, чтобы обычные пользователи не видели
+    
     try:
-        await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
-        await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
-        logger.info("✅ Команды зарегистрированы")
+        # Для всех групп регистрируем только базовые команды
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllGroupChats())
+        
+        # Для ЛС тоже базовые
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+        
+        logger.info("✅ Команды зарегистрированы (обычные пользователи видят только базовые)")
+        logger.info("ℹ️  Команды модерации скрыты от обычных пользователей")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка регистрации команд: {e}")
 
@@ -410,52 +472,72 @@ async def init_staff():
 
 
 # =============================================================================
-# КОМАНДЫ - START, HELP
+# КОМАНДА - HELP
 # =============================================================================
 
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    text = (
-        "👋 <b>Привет!</b>\n\n"
-        "Я бот для модерации групп.\n\n"
-        "📋 <b>Основные команды:</b>\n"
-        "• /warn - выдать предупреждение\n"
-        "• /mute - замутить\n"
-        "• /ban - забанить\n"
-        "• /kick - кикнуть\n"
-        "• /stats - статистика\n\n"
-        "ℹ️ Используй /help для подробной справки"
-    )
-    await message.answer(text, parse_mode="HTML")
-
+# =============================================================================
+# КОМАНДА - HELP
+# =============================================================================
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
+    """Справка по командам - показывает только доступные команды по роли"""
+    role = await get_caller_role(message)
+    
+    # Базовая справка для всех
     text = (
         "📖 <b>Справка по командам бота</b>\n\n"
-        "<b>Модерация:</b>\n"
-        "• /warn @user [причина] - предупреждение\n"
-        "• /unwarn @user - снять варн\n"
-        "• /mute @user - мут (выбор времени)\n"
-        "• /unmute @user - размутить\n"
-        "• /ban @user - бан (выбор времени)\n"
-        "• /unban @user - разбанить\n"
-        "• /kick @user [причина] - кикнуть\n"
-        "• /ro - режим RO для всего чата (кроме staff)\n"
-        "• /unro - снять режим RO\n\n"
-        "<b>Глобальные команды (7+):</b>\n"
-        "• /gban @user [причина] - глобальный бан\n"
-        "• /ungban @user - снять глобальный бан\n\n"
-        "<b>Управление (7+):</b>\n"
-        "• /setrole @user <роль> - назначить роль (0-10)\n"
-        "• /removerole @user - снять роль\n"
-        "• /setnick @user <ник> - установить ник\n"
-        "• /clear <N> - очистить N сообщений\n\n"
+    )
+    
+    if role >= 1:
+        # Полная справка для staff
+        text += (
+            "<b>Модерация (уровень 1+):</b>\n"
+            "• /warn @user [причина] - предупреждение\n"
+            "• /unwarn @user - снять варн\n"
+            "• /mute @user - мут (выбор времени)\n"
+            "• /unmute @user - размутить\n"
+            "• /kick @user [причина] - кикнуть\n"
+            "• /ro - режим RO для всего чата (кроме staff)\n"
+            "• /unro - снять режим RO\n"
+            "• /setnick @user <ник> - установить ник\n"
+            "• /clear <N> - очистить N сообщений\n\n"
+        )
+    
+    if role >= 3:
+        text += (
+            "<b>Баны (уровень 3+):</b>\n"
+            "• /ban @user - бан (выбор времени)\n"
+            "• /unban @user - разбанить\n\n"
+        )
+    
+    if role >= 7:
+        text += (
+            "<b>Глобальные команды (уровень 7+):</b>\n"
+            "• /gban @user [причина] - глобальный бан\n"
+            "• /ungban @user - снять глобальный бан\n\n"
+            "<b>Управление (уровень 7+):</b>\n"
+            "• /setrole @user <роль> - назначить роль (0-10)\n"
+            "• /removerole @user - снять роль\n\n"
+        )
+    
+    # Информация доступна всем
+    text += (
         "<b>Информация:</b>\n"
         "• /stats [@user] - статистика\n"
-        "• /staff - список команды\n\n"
-        "💡 Можно использовать команды без @botusername"
     )
+    
+    if role >= 1:
+        text += "• /staff - список команды\n"
+    
+    text += "\n💡 Можно использовать команды без @botusername"
+    
+    if role == 0:
+        text += (
+            "\n\n<i>ℹ️ Вы обычный пользователь.\n"
+            "Команды модерации доступны только staff.</i>"
+        )
+    
     await message.answer(text, parse_mode="HTML")
 
 
@@ -574,10 +656,20 @@ async def cmd_warn(message: Message):
         return
 
     args = get_args(message, maxsplit=2)
+    logger.info(f"warn: args = {args}")
+    
     target = await parse_user(message, args)
 
     if not target:
-        await message.reply("❌ Укажите пользователя: /warn @user [причина]")
+        usage_text = (
+            "❌ <b>Не удалось определить пользователя</b>\n\n"
+            "<b>Использование:</b>\n"
+            "<code>/warn @username [причина]</code>\n"
+            "Или ответьте на сообщение пользователя\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/warn @ishakbest спам в чате</code>"
+        )
+        await message.reply(usage_text, parse_mode="HTML")
         return
 
     target_role = await get_role(target, message.chat.id)
@@ -586,6 +678,8 @@ async def cmd_warn(message: Message):
         return
 
     reason = args[2] if len(args) > 2 else "Нарушение правил"
+    logger.info(f"warn: target={target}, reason='{reason}'")
+    
     caller_id = await get_caller_id_safe(message)
 
     # Создаем кнопки
@@ -643,11 +737,15 @@ async def cb_confirm_warn(call: CallbackQuery):
             )
             await call.answer(f"✅ Варн выдан! Кикнут за {MAX_WARNS} варна.", show_alert=True)
         else:
+            # Добавляем кнопки быстрых действий к сообщению
+            quick_actions = create_quick_actions_keyboard(target, chat_id)
+            
             await call.message.edit_text(
                 f"⚠️ {target_name} получил предупреждение!\n"
                 f"Причина: {reason}\n"
                 f"Предупреждений: {warns}/{MAX_WARNS}",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=quick_actions.as_markup()
             )
             await call.answer(f"✅ Варн выдан! Всего: {warns}/{MAX_WARNS}", show_alert=True)
         
@@ -759,9 +857,13 @@ async def cb_apply_mute(call: CallbackQuery):
         target_name = await mention(target, chat_id)
         duration_text = f"{seconds // 60} минут" if seconds < 3600 else f"{seconds // 3600} часов" if seconds < 86400 else f"{seconds // 86400} дней" if seconds > 0 else "навсегда"
         
+        # Добавляем кнопки быстрых действий
+        quick_actions = create_quick_actions_keyboard(target, chat_id)
+        
         await call.message.edit_text(
             f"🔇 {target_name} замучен на {duration_text}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=quick_actions.as_markup()
         )
         await call.answer("✅ Мут применен!", show_alert=True)
         
@@ -792,7 +894,15 @@ async def cmd_unmute(message: Message):
         await db.remove_mute(target, message.chat.id)
         
         target_name = await mention(target, message.chat.id)
-        await message.answer(f"🔊 {target_name} размучен!", parse_mode="HTML")
+        
+        # Добавляем кнопки быстрых действий
+        quick_actions = create_quick_actions_keyboard(target, message.chat.id)
+        
+        await message.answer(
+            f"🔊 {target_name} размучен!",
+            parse_mode="HTML",
+            reply_markup=quick_actions.as_markup()
+        )
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -861,9 +971,13 @@ async def cb_apply_ban(call: CallbackQuery):
         target_name = await mention(target, chat_id)
         duration_text = f"{seconds // 86400} дней" if seconds >= 86400 else f"{seconds // 60} минут" if seconds > 0 else "навсегда"
         
+        # Добавляем кнопки быстрых действий
+        quick_actions = create_quick_actions_keyboard(target, chat_id)
+        
         await call.message.edit_text(
             f"🚫 {target_name} забанен на {duration_text}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=quick_actions.as_markup()
         )
         await call.answer("✅ Бан применен!", show_alert=True)
         
@@ -891,7 +1005,15 @@ async def cmd_unban(message: Message):
         await db.remove_ban(target, message.chat.id)
         
         target_name = await mention(target, message.chat.id)
-        await message.answer(f"✅ {target_name} разбанен!", parse_mode="HTML")
+        
+        # Добавляем кнопки быстрых действий
+        quick_actions = create_quick_actions_keyboard(target, message.chat.id)
+        
+        await message.answer(
+            f"✅ {target_name} разбанен!",
+            parse_mode="HTML",
+            reply_markup=quick_actions.as_markup()
+        )
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -909,10 +1031,20 @@ async def cmd_kick(message: Message):
         return
 
     args = get_args(message, maxsplit=2)
+    logger.info(f"kick: args = {args}")
+    
     target = await parse_user(message, args)
 
     if not target:
-        await message.reply("❌ Укажите пользователя: /kick @user [причина]")
+        usage_text = (
+            "❌ <b>Не удалось определить пользователя</b>\n\n"
+            "<b>Использование:</b>\n"
+            "<code>/kick @username [причина]</code>\n"
+            "Или ответьте на сообщение пользователя\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/kick @ishakbest флуд</code>"
+        )
+        await message.reply(usage_text, parse_mode="HTML")
         return
 
     target_role = await get_role(target, message.chat.id)
@@ -921,6 +1053,7 @@ async def cmd_kick(message: Message):
         return
 
     reason = args[2] if len(args) > 2 else "Кик"
+    logger.info(f"kick: target={target}, reason='{reason}'")
 
     try:
         await bot.ban_chat_member(message.chat.id, target)
@@ -928,9 +1061,14 @@ async def cmd_kick(message: Message):
         await bot.unban_chat_member(message.chat.id, target)
         
         target_name = await mention(target, message.chat.id)
+        
+        # Добавляем кнопки быстрых действий
+        quick_actions = create_quick_actions_keyboard(target, message.chat.id)
+        
         await message.answer(
             f"👢 {target_name} кикнут!\nПричина: {reason}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=quick_actions.as_markup()
         )
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
@@ -1003,11 +1141,27 @@ async def cmd_gban(message: Message):
         await message.reply("❌ Недостаточно прав! Требуется уровень 7+")
         return
 
+    # Парсим аргументы
     args = get_args(message, maxsplit=2)
+    logger.info(f"gban: args = {args}")
+    
+    # Парсим пользователя
     target = await parse_user(message, args)
 
     if not target:
-        await message.reply("❌ Укажите пользователя: /gban @user [причина]")
+        # Более детальное сообщение об ошибке
+        usage_text = (
+            "❌ <b>Не удалось определить пользователя</b>\n\n"
+            "<b>Использование:</b>\n"
+            "<code>/gban @username [причина]</code>\n"
+            "<code>/gban ID [причина]</code>\n"
+            "Или ответьте на сообщение пользователя\n\n"
+            "<b>Примеры:</b>\n"
+            "<code>/gban @ishakbest нарушил правило 1.1</code>\n"
+            "<code>/gban 123456789 спам</code>"
+        )
+        await message.reply(usage_text, parse_mode="HTML")
+        logger.warning(f"gban: Пользователь не найден. args={args}")
         return
 
     target_role = await get_role(target)
@@ -1028,12 +1182,15 @@ async def cmd_gban(message: Message):
             f"Пользователь является членом команды:\n"
             f"Роль: {ROLE_NAMES.get(target_role)} ({target_role})\n\n"
             f"Для глобального бана сначала необходимо снять роль:\n"
-            f"<code>/removerole @user</code>",
+            f"<code>/removerole {await mention(target)}</code>",
             parse_mode="HTML"
         )
         return
 
+    # Получаем причину (всё после второго аргумента)
     reason = args[2] if len(args) > 2 else "Глобальный бан"
+    logger.info(f"gban: target={target}, reason='{reason}'")
+    
     caller_id = await get_caller_id_safe(message)
 
     # Создаем кнопки подтверждения
@@ -1046,6 +1203,7 @@ async def cmd_gban(message: Message):
     text = (
         f"🌐 <b>Подтвердите глобальный бан</b>\n\n"
         f"Пользователь: {target_name}\n"
+        f"ID: <code>{target}</code>\n"
         f"Причина: {reason}\n\n"
         f"⚠️ Пользователь будет забанен во всех модерируемых чатах!\n\n"
         f"Выберите действие:"
@@ -1368,10 +1526,15 @@ async def on_user_join(event: ChatMemberUpdated):
     if await db.is_globally_banned(user_id):
         try:
             await bot.ban_chat_member(chat_id, user_id)
+            
+            # Добавляем кнопки быстрых действий
+            quick_actions = create_quick_actions_keyboard(user_id, chat_id)
+            
             await bot.send_message(
                 chat_id,
                 f"🚫 Пользователь {await mention(user_id)} имеет глобальный бан и был удален из чата.",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=quick_actions.as_markup()
             )
             logger.info(f"Глобально забаненный пользователь {user_id} удален из чата {chat_id}")
         except Exception as e:
@@ -1382,12 +1545,20 @@ async def on_user_join(event: ChatMemberUpdated):
     if event.new_chat_member.user.username:
         await db.cache_username(user_id, event.new_chat_member.user.username)
 
-    # Приветственное сообщение
+    # Приветственное сообщение с кнопками
     welcome = await db.get_welcome(chat_id)
     if welcome:
         name = event.new_chat_member.user.full_name
         text = welcome.replace("{user}", name)
-        await bot.send_message(chat_id, text)
+        
+        # Добавляем кнопки быстрых действий для модераторов
+        quick_actions = create_quick_actions_keyboard(user_id, chat_id)
+        
+        await bot.send_message(
+            chat_id, 
+            text,
+            reply_markup=quick_actions.as_markup()
+        )
 
 
 @router.message(F.text)
@@ -1452,10 +1623,15 @@ async def on_message(message: Message):
                     until_date=timedelta(minutes=30)
                 )
                 await message.delete()
+                
+                # Добавляем кнопки быстрых действий
+                quick_actions = create_quick_actions_keyboard(user_id, chat_id)
+                
                 await bot.send_message(
                     chat_id,
                     f"🔇 {await mention(user_id)} замучен на 30 мин за спам",
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    reply_markup=quick_actions.as_markup()
                 )
             except Exception:
                 pass
@@ -1476,10 +1652,15 @@ async def on_message(message: Message):
                         permissions=muted_permissions(),
                         until_date=timedelta(minutes=30)
                     )
+                    
+                    # Добавляем кнопки быстрых действий
+                    quick_actions = create_quick_actions_keyboard(user_id, chat_id)
+                    
                     await bot.send_message(
                         chat_id,
                         f"🔇 {await mention(user_id)} замучен за запрещённое слово",
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=quick_actions.as_markup()
                     )
                 except Exception:
                     pass
@@ -1489,6 +1670,233 @@ async def on_message(message: Message):
 # =============================================================================
 # CALLBACK HANDLERS
 # =============================================================================
+
+# =============================================================================
+# CALLBACK HANDLERS - QUICK ACTIONS (БЫСТРЫЕ ДЕЙСТВИЯ ИЗ КНОПОК)
+# =============================================================================
+
+@router.callback_query(F.data.startswith("quickwarn:"))
+async def cb_quick_warn(call: CallbackQuery):
+    """Быстрый варн через кнопку"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    role = await get_role(call.from_user.id, chat_id)
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя выдать варн!", show_alert=True)
+        return
+
+    try:
+        warns = await db.add_warn(target, chat_id, call.from_user.id, "Быстрый варн")
+        target_name = await mention(target, chat_id)
+        
+        if warns >= MAX_WARNS:
+            await bot.ban_chat_member(chat_id, target)
+            await asyncio.sleep(0.5)
+            await bot.unban_chat_member(chat_id, target)
+            await db.clear_warns(target, chat_id)
+            
+            await call.message.edit_text(
+                f"{call.message.text}\n\n👢 <b>Кикнут за {MAX_WARNS} варна!</b>",
+                parse_mode="HTML",
+                reply_markup=None
+            )
+            await call.answer(f"✅ Варн выдан! Кикнут.", show_alert=True)
+        else:
+            # Обновляем кнопки
+            quick_actions = create_quick_actions_keyboard(target, chat_id)
+            await call.message.edit_reply_markup(reply_markup=quick_actions.as_markup())
+            await call.answer(f"✅ Варн выдан! Всего: {warns}/{MAX_WARNS}", show_alert=True)
+            
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickmute:"))
+async def cb_quick_mute(call: CallbackQuery):
+    """Быстрый мут - показываем выбор времени"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    role = await get_role(call.from_user.id, chat_id)
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя замутить!", show_alert=True)
+        return
+
+    # Показываем выбор времени
+    builder = create_duration_keyboard("applymute", target, chat_id)
+    builder.button(text="🔙 Назад", callback_data=f"backtoactions:{target}:{chat_id}")
+    builder.adjust(2)
+
+    target_name = await mention(target, chat_id)
+    await call.message.edit_text(
+        f"🔇 <b>Выберите время мута</b>\n\nПользователь: {target_name}",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("quickban:"))
+async def cb_quick_ban(call: CallbackQuery):
+    """Быстрый бан - показываем выбор времени"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    role = await get_role(call.from_user.id, chat_id)
+    if role < 3:
+        await call.answer("❌ Недостаточно прав! Требуется уровень 3+", show_alert=True)
+        return
+
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя забанить!", show_alert=True)
+        return
+
+    # Показываем выбор времени
+    builder = create_duration_keyboard("applyban", target, chat_id)
+    builder.button(text="🔙 Назад", callback_data=f"backtoactions:{target}:{chat_id}")
+    builder.adjust(2)
+
+    target_name = await mention(target, chat_id)
+    await call.message.edit_text(
+        f"🚫 <b>Выберите время бана</b>\n\nПользователь: {target_name}",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("quickkick:"))
+async def cb_quick_kick(call: CallbackQuery):
+    """Быстрый кик"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    role = await get_role(call.from_user.id, chat_id)
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя кикнуть!", show_alert=True)
+        return
+
+    try:
+        await bot.ban_chat_member(chat_id, target)
+        await asyncio.sleep(0.5)
+        await bot.unban_chat_member(chat_id, target)
+        
+        target_name = await mention(target, chat_id)
+        await call.message.edit_text(
+            f"{call.message.text}\n\n👢 <b>Кикнут модератором</b> {await mention(call.from_user.id, chat_id)}",
+            parse_mode="HTML",
+            reply_markup=None
+        )
+        await call.answer("✅ Кикнут!", show_alert=True)
+        
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickstats:"))
+async def cb_quick_stats(call: CallbackQuery):
+    """Быстрая статистика"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    info = await get_user_info(target)
+    role = await get_role(target, chat_id)
+    warns = await db.get_warns(target, chat_id)
+    is_muted = await db.is_muted(target, chat_id)
+    is_banned = await db.is_banned(target, chat_id)
+    
+    stats_text = (
+        f"📊 <b>Статистика</b>\n\n"
+        f"ID: <code>{target}</code>\n"
+    )
+    
+    if info['username']:
+        stats_text += f"Username: @{info['username']}\n"
+    
+    stats_text += (
+        f"Роль: {ROLE_NAMES.get(role, 'Пользователь')} ({role})\n"
+        f"Варны: {warns}/{MAX_WARNS}\n"
+        f"Мут: {'✅' if is_muted else '❌'}\n"
+        f"Бан: {'✅' if is_banned else '❌'}"
+    )
+    
+    await call.answer(stats_text, show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quickclear:"))
+async def cb_quick_clear(call: CallbackQuery):
+    """Быстрая очистка сообщений"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    role = await get_role(call.from_user.id, chat_id)
+    if role < 1:
+        await call.answer("❌ Недостаточно прав!", show_alert=True)
+        return
+
+    target_role = await get_role(target, chat_id)
+    if target_role >= role:
+        await call.answer("❌ Нельзя очистить сообщения!", show_alert=True)
+        return
+
+    await call.answer("🧹 Очистка последних 10 сообщений...", show_alert=False)
+    
+    deleted = 0
+    try:
+        current_msg_id = call.message.message_id
+        
+        for i in range(1, 11):
+            try:
+                await bot.delete_message(chat_id, current_msg_id - i)
+                deleted += 1
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+        
+        # Обновляем кнопки
+        quick_actions = create_quick_actions_keyboard(target, chat_id)
+        await call.message.edit_text(
+            f"{call.message.text}\n\n🧹 <b>Очищено {deleted} сообщений</b>",
+            parse_mode="HTML",
+            reply_markup=quick_actions.as_markup()
+        )
+        
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("backtoactions:"))
+async def cb_back_to_actions(call: CallbackQuery):
+    """Вернуться к кнопкам быстрых действий"""
+    parts = call.data.split(":")
+    target, chat_id = int(parts[1]), int(parts[2])
+    
+    # Возвращаем кнопки быстрых действий
+    quick_actions = create_quick_actions_keyboard(target, chat_id)
+    target_name = await mention(target, chat_id)
+    
+    await call.message.edit_text(
+        f"Выберите действие для {target_name}:",
+        parse_mode="HTML",
+        reply_markup=quick_actions.as_markup()
+    )
+    await call.answer()
+
 
 @router.callback_query(F.data.startswith("cancelaction:"))
 async def cb_cancel_action(call: CallbackQuery):
@@ -1506,7 +1914,7 @@ async def main():
     db = Database("database.db")
     await db.init()
 
-    logger.info("🔵 Модерация Анонимные сообщения | Георгиевка v4.1")
+    logger.info("🔵 Модерация Анонимные сообщения | Георгиевка v4.3")
     logger.info("Инициализация...")
 
     await init_staff()
