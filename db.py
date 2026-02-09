@@ -296,6 +296,43 @@ class Database:
             row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def get_all_bans_paginated(self, page: int = 0, per_page: int = 5,
+                                      chat_id: int = 0) -> Tuple[List[Dict], int]:
+        """Получить баны с пагинацией. chat_id=0 — все чаты. Возвращает (записи, всего)."""
+        offset = page * per_page
+        if chat_id:
+            async with self.db.execute(
+                "SELECT COUNT(*) as cnt FROM bans WHERE chat_id = ?", (chat_id,)
+            ) as cur:
+                total = (await cur.fetchone())['cnt']
+            async with self.db.execute(
+                "SELECT * FROM bans WHERE chat_id = ? ORDER BY banned_at DESC LIMIT ? OFFSET ?",
+                (chat_id, per_page, offset)
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+        else:
+            async with self.db.execute("SELECT COUNT(*) as cnt FROM bans") as cur:
+                total = (await cur.fetchone())['cnt']
+            async with self.db.execute(
+                "SELECT * FROM bans ORDER BY banned_at DESC LIMIT ? OFFSET ?",
+                (per_page, offset)
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+        return rows, total
+
+    async def get_all_global_bans_paginated(self, page: int = 0,
+                                             per_page: int = 5) -> Tuple[List[Dict], int]:
+        """Глобальные баны с пагинацией."""
+        offset = page * per_page
+        async with self.db.execute("SELECT COUNT(*) as cnt FROM global_bans") as cur:
+            total = (await cur.fetchone())['cnt']
+        async with self.db.execute(
+            "SELECT * FROM global_bans ORDER BY banned_at DESC LIMIT ? OFFSET ?",
+            (per_page, offset)
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        return rows, total
+
     # =========================================================================
     # МУТЫ
     # =========================================================================
@@ -393,6 +430,30 @@ class Database:
     async def clear_warns(self, user_id: int, chat_id: int):
         await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
         await self.db.commit()
+
+    async def get_all_warns_paginated(self, page: int = 0, per_page: int = 5,
+                                       chat_id: int = 0) -> Tuple[List[Dict], int]:
+        """Активные варны с пагинацией. chat_id=0 — все чаты."""
+        offset = page * per_page
+        if chat_id:
+            async with self.db.execute(
+                "SELECT COUNT(*) as cnt FROM warns WHERE chat_id = ? AND count > 0", (chat_id,)
+            ) as cur:
+                total = (await cur.fetchone())['cnt']
+            async with self.db.execute(
+                "SELECT * FROM warns WHERE chat_id = ? AND count > 0 ORDER BY warned_at DESC LIMIT ? OFFSET ?",
+                (chat_id, per_page, offset)
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+        else:
+            async with self.db.execute("SELECT COUNT(*) as cnt FROM warns WHERE count > 0") as cur:
+                total = (await cur.fetchone())['cnt']
+            async with self.db.execute(
+                "SELECT * FROM warns WHERE count > 0 ORDER BY warned_at DESC LIMIT ? OFFSET ?",
+                (per_page, offset)
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+        return rows, total
 
     # =========================================================================
     # КЭШ ДЕЙСТВИЙ (причины, параметры)
