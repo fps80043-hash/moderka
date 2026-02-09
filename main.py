@@ -342,20 +342,6 @@ def kb_after_action(target_id: int, chat_id: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def kb_user_actions(target_id: int, chat_id: int, caller_role: int) -> InlineKeyboardMarkup:
-    """Кнопки действий над юзером (для /info, /stats)"""
-    b = InlineKeyboardBuilder()
-    if caller_role >= 1:
-        b.button(text="⚠️ Варн", callback_data=f"startwarn:{target_id}:{chat_id}")
-        b.button(text="🔇 Мут", callback_data=f"startmute:{target_id}:{chat_id}")
-        b.button(text="👢 Кик", callback_data=f"dokick:{target_id}:{chat_id}")
-    if caller_role >= 3:
-        b.button(text="🚫 Бан", callback_data=f"startban:{target_id}:{chat_id}")
-    if caller_role >= 7:
-        b.button(text="🌐 Глобальный бан", callback_data=f"startgban:{target_id}:{chat_id}")
-    b.adjust(3, 2)
-    return b.as_markup()
-
 
 # =============================================================================
 # HELP — ИНТЕРАКТИВНОЕ МЕНЮ
@@ -673,9 +659,7 @@ async def cmd_stats(message: Message):
         return
 
     text = await build_stats_text(target, message.chat.id)
-    caller_role = await get_caller_role(message)
-    markup = kb_user_actions(target, message.chat.id, caller_role) if caller_role >= 1 else kb_after_action(target, message.chat.id)
-    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await message.answer(text, parse_mode="HTML")
 
 
 async def build_stats_text(target: int, chat_id: int) -> str:
@@ -1397,12 +1381,9 @@ async def cb_info(call: CallbackQuery):
     parts = call.data.split(":")
     target, chat_id = int(parts[1]), int(parts[2])
     text = await build_stats_text(target, chat_id)
-    role = await get_role(call.from_user.id, chat_id)
-    markup = kb_user_actions(target, chat_id, role) if role >= 1 else None
     try:
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        await call.message.edit_text(text, parse_mode="HTML")
     except Exception:
-        # Текст не изменился — показываем popup
         await call.answer(f"ID: {target}", show_alert=False)
     await call.answer()
 
