@@ -1,17 +1,9 @@
-version: '3.8'
+version: "3.8"
 
 services:
   bot:
     build: .
-    container_name: tg-moderation-bot
     restart: unless-stopped
     volumes:
-      - ./data:/app/data
-      - ./config.json:/app/config.json
-    environment:
-      - TZ=Europe/Moscow
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./database.db:/app/database.db
+      - ./config.json:/app/config.json:ro

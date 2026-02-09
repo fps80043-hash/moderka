@@ -1,7 +1,9 @@
 {
   "bot_token": "8310857029:AAFyoParxN3JA0vjGVWsqs7sGRSE22l8VpA",
   "moderated_chats": [
-    -1001234567890
+    -1001234567890,
+    -1003839597579,
+    -1003596144519
   ],
   "preset_staff": {
     "5027253935": 10,
