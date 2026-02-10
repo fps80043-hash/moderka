@@ -1,10 +1,13 @@
 {
   "bot_token": "8310857029:AAFyoParxN3JA0vjGVWsqs7sGRSE22l8VpA",
   "moderated_chats": [
-    -1001234567890,
     -1003839597579,
     -1003596144519
   ],
+  "staff_chat_id": -1002536264779,
+  "log_topic_id": 1049,
+  "gban_topic_id": 307,
+  "support_link": "https://t.me/TehDevGeorgAnonim?direct",
   "preset_staff": {
     "5027253935": 10,
     "5180464084": 8,

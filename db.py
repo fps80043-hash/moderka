@@ -1,9 +1,5 @@
 """
-Database module v6.0 — Полная переработка
-- Стабильный кэш username/user_id
-- Надёжные транзакции
-- ro_mode в схеме с самого начала
-- Кэш причин для всех действий (не только warn)
+Database module v7.0
 """
 
 import aiosqlite
@@ -42,109 +38,74 @@ class Database:
                 ro_mode INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE TABLE IF NOT EXISTS global_roles (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 role INTEGER DEFAULT 0,
                 added_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE TABLE IF NOT EXISTS global_bans (
                 user_id INTEGER PRIMARY KEY,
                 banned_by INTEGER,
                 reason TEXT,
                 banned_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE TABLE IF NOT EXISTS user_roles (
-                user_id INTEGER,
-                chat_id INTEGER,
-                role INTEGER DEFAULT 0,
+                user_id INTEGER, chat_id INTEGER, role INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, chat_id)
             );
-
             CREATE TABLE IF NOT EXISTS nicks (
-                user_id INTEGER,
-                chat_id INTEGER,
-                nick TEXT,
+                user_id INTEGER, chat_id INTEGER, nick TEXT,
                 PRIMARY KEY (user_id, chat_id)
             );
-
             CREATE TABLE IF NOT EXISTS username_cache (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT COLLATE NOCASE,
                 updated_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE TABLE IF NOT EXISTS bans (
-                user_id INTEGER,
-                chat_id INTEGER,
-                banned_by INTEGER,
-                reason TEXT,
-                until INTEGER DEFAULT 0,
+                user_id INTEGER, chat_id INTEGER, banned_by INTEGER,
+                reason TEXT, until INTEGER DEFAULT 0,
                 banned_at INTEGER DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (user_id, chat_id)
             );
-
             CREATE TABLE IF NOT EXISTS mutes (
-                user_id INTEGER,
-                chat_id INTEGER,
-                muted_by INTEGER,
-                reason TEXT,
-                until INTEGER,
+                user_id INTEGER, chat_id INTEGER, muted_by INTEGER,
+                reason TEXT, until INTEGER,
                 muted_at INTEGER DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (user_id, chat_id)
             );
-
             CREATE TABLE IF NOT EXISTS warns (
-                user_id INTEGER,
-                chat_id INTEGER,
-                count INTEGER DEFAULT 0,
-                warned_by INTEGER,
-                reason TEXT,
+                user_id INTEGER, chat_id INTEGER, count INTEGER DEFAULT 0,
+                warned_by INTEGER, reason TEXT,
                 warned_at INTEGER DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (user_id, chat_id)
             );
-
             CREATE TABLE IF NOT EXISTS warn_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                chat_id INTEGER,
-                warned_by INTEGER,
-                reason TEXT,
-                warned_at INTEGER DEFAULT (strftime('%s', 'now'))
+                user_id INTEGER, chat_id INTEGER, warned_by INTEGER,
+                reason TEXT, warned_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE TABLE IF NOT EXISTS banwords (
-                chat_id INTEGER,
-                word TEXT COLLATE NOCASE,
+                chat_id INTEGER, word TEXT COLLATE NOCASE,
                 PRIMARY KEY (chat_id, word)
             );
-
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                chat_id INTEGER,
-                message_id INTEGER,
+                user_id INTEGER, chat_id INTEGER, message_id INTEGER,
                 sent_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE TABLE IF NOT EXISTS action_cache (
-                key TEXT PRIMARY KEY,
-                data TEXT,
+                key TEXT PRIMARY KEY, data TEXT,
                 cached_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
-
             CREATE INDEX IF NOT EXISTS idx_messages_user_chat ON messages(user_id, chat_id);
             CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_at);
             CREATE INDEX IF NOT EXISTS idx_uname_cache_name ON username_cache(username);
         """)
         await self.db.commit()
 
-    # =========================================================================
-    # ЧАТЫ
-    # =========================================================================
+    # === ЧАТЫ ===
 
     async def register_chat(self, chat_id: int, title: str = ""):
         await self.db.execute("""
@@ -153,17 +114,16 @@ class Database:
         """, (chat_id, title))
         await self.db.commit()
 
-    async def get_all_chats(self) -> List[Dict]:
-        async with self.db.execute("SELECT * FROM chats") as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
     async def get_all_chat_ids(self) -> List[int]:
         async with self.db.execute("SELECT chat_id FROM chats") as cur:
             return [row['chat_id'] for row in await cur.fetchall()]
 
-    # =========================================================================
-    # USERNAME CACHE — по user_id как PK, username ищем по индексу
-    # =========================================================================
+    async def get_chat_title(self, chat_id: int) -> str:
+        async with self.db.execute("SELECT title FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+            row = await cur.fetchone()
+            return row['title'] if row else str(chat_id)
+
+    # === USERNAME CACHE ===
 
     async def cache_username(self, user_id: int, username: str):
         if not username:
@@ -185,9 +145,7 @@ class Database:
             return row['user_id'] if row else None
 
     async def get_username_by_id(self, user_id: int) -> Optional[str]:
-        async with self.db.execute(
-            "SELECT username FROM username_cache WHERE user_id = ?", (user_id,)
-        ) as cur:
+        async with self.db.execute("SELECT username FROM username_cache WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
             if row and row['username']:
                 return row['username']
@@ -198,9 +156,7 @@ class Database:
             row = await cur.fetchone()
             return row['username'] if row else None
 
-    # =========================================================================
-    # ГЛОБАЛЬНЫЕ РОЛИ
-    # =========================================================================
+    # === ГЛОБАЛЬНЫЕ РОЛИ ===
 
     async def set_global_role(self, user_id: int, role: int, username: str = None):
         await self.db.execute("""
@@ -221,9 +177,7 @@ class Database:
         async with self.db.execute("SELECT user_id, role FROM global_roles WHERE role > 0 ORDER BY role DESC") as cur:
             return [(row['user_id'], row['role']) for row in await cur.fetchall()]
 
-    # =========================================================================
-    # ЛОКАЛЬНЫЕ РОЛИ
-    # =========================================================================
+    # === ЛОКАЛЬНЫЕ РОЛИ ===
 
     async def set_user_role(self, user_id: int, chat_id: int, role: int):
         if role == 0:
@@ -242,9 +196,7 @@ class Database:
             row = await cur.fetchone()
             return row['role'] if row else 0
 
-    # =========================================================================
-    # ГЛОБАЛЬНЫЙ БАН
-    # =========================================================================
+    # === ГЛОБАЛЬНЫЙ БАН ===
 
     async def add_global_ban(self, user_id: int, banned_by: int, reason: str):
         await self.db.execute("""
@@ -267,9 +219,7 @@ class Database:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    # =========================================================================
-    # БАНЫ
-    # =========================================================================
+    # === БАНЫ ===
 
     async def add_ban(self, user_id: int, chat_id: int, banned_by: int, reason: str, until: int = 0):
         await self.db.execute("""
@@ -284,26 +234,18 @@ class Database:
         await self.db.commit()
 
     async def is_banned(self, user_id: int, chat_id: int) -> bool:
-        async with self.db.execute(
-            "SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             return await cur.fetchone() is not None
 
     async def get_ban_info(self, user_id: int, chat_id: int) -> Optional[Dict]:
-        async with self.db.execute(
-            "SELECT * FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT * FROM bans WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    async def get_all_bans_paginated(self, page: int = 0, per_page: int = 5,
-                                      chat_id: int = 0) -> Tuple[List[Dict], int]:
-        """Получить баны с пагинацией. chat_id=0 — все чаты. Возвращает (записи, всего)."""
+    async def get_all_bans_paginated(self, page: int = 0, per_page: int = 5, chat_id: int = 0) -> Tuple[List[Dict], int]:
         offset = page * per_page
         if chat_id:
-            async with self.db.execute(
-                "SELECT COUNT(*) as cnt FROM bans WHERE chat_id = ?", (chat_id,)
-            ) as cur:
+            async with self.db.execute("SELECT COUNT(*) as cnt FROM bans WHERE chat_id = ?", (chat_id,)) as cur:
                 total = (await cur.fetchone())['cnt']
             async with self.db.execute(
                 "SELECT * FROM bans WHERE chat_id = ? ORDER BY banned_at DESC LIMIT ? OFFSET ?",
@@ -314,28 +256,22 @@ class Database:
             async with self.db.execute("SELECT COUNT(*) as cnt FROM bans") as cur:
                 total = (await cur.fetchone())['cnt']
             async with self.db.execute(
-                "SELECT * FROM bans ORDER BY banned_at DESC LIMIT ? OFFSET ?",
-                (per_page, offset)
+                "SELECT * FROM bans ORDER BY banned_at DESC LIMIT ? OFFSET ?", (per_page, offset)
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
         return rows, total
 
-    async def get_all_global_bans_paginated(self, page: int = 0,
-                                             per_page: int = 5) -> Tuple[List[Dict], int]:
-        """Глобальные баны с пагинацией."""
+    async def get_all_global_bans_paginated(self, page: int = 0, per_page: int = 5) -> Tuple[List[Dict], int]:
         offset = page * per_page
         async with self.db.execute("SELECT COUNT(*) as cnt FROM global_bans") as cur:
             total = (await cur.fetchone())['cnt']
         async with self.db.execute(
-            "SELECT * FROM global_bans ORDER BY banned_at DESC LIMIT ? OFFSET ?",
-            (per_page, offset)
+            "SELECT * FROM global_bans ORDER BY banned_at DESC LIMIT ? OFFSET ?", (per_page, offset)
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
         return rows, total
 
-    # =========================================================================
-    # МУТЫ
-    # =========================================================================
+    # === МУТЫ ===
 
     async def add_mute(self, user_id: int, chat_id: int, muted_by: int, reason: str, until: int):
         await self.db.execute("""
@@ -351,9 +287,7 @@ class Database:
 
     async def is_muted(self, user_id: int, chat_id: int) -> bool:
         now = int(time.time())
-        async with self.db.execute(
-            "SELECT until FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT until FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             if not row:
                 return False
@@ -366,64 +300,45 @@ class Database:
             return False
 
     async def get_mute_info(self, user_id: int, chat_id: int) -> Optional[Dict]:
-        async with self.db.execute(
-            "SELECT * FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT * FROM mutes WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    # =========================================================================
-    # ВАРНЫ
-    # =========================================================================
+    # === ВАРНЫ ===
 
     async def add_warn(self, user_id: int, chat_id: int, warned_by: int, reason: str) -> int:
-        async with self.db.execute(
-            "SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             current = row['count'] if row else 0
-
         new_count = current + 1
-
         await self.db.execute("""
             INSERT INTO warns (user_id, chat_id, count, warned_by, reason) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id, chat_id) DO UPDATE SET count = excluded.count,
-                warned_by = excluded.warned_by, reason = excluded.reason,
-                warned_at = strftime('%s', 'now')
+                warned_by = excluded.warned_by, reason = excluded.reason, warned_at = strftime('%s', 'now')
         """, (user_id, chat_id, new_count, warned_by, reason))
-
-        await self.db.execute("""
-            INSERT INTO warn_history (user_id, chat_id, warned_by, reason) VALUES (?, ?, ?, ?)
-        """, (user_id, chat_id, warned_by, reason))
-
+        await self.db.execute(
+            "INSERT INTO warn_history (user_id, chat_id, warned_by, reason) VALUES (?, ?, ?, ?)",
+            (user_id, chat_id, warned_by, reason)
+        )
         await self.db.commit()
         return new_count
 
     async def remove_warn(self, user_id: int, chat_id: int) -> int:
-        async with self.db.execute(
-            "SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             current = row['count'] if row else 0
-
         if current <= 0:
             return 0
-
         new_count = current - 1
         if new_count == 0:
             await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
         else:
-            await self.db.execute(
-                "UPDATE warns SET count = ? WHERE user_id = ? AND chat_id = ?",
-                (new_count, user_id, chat_id)
-            )
+            await self.db.execute("UPDATE warns SET count = ? WHERE user_id = ? AND chat_id = ?", (new_count, user_id, chat_id))
         await self.db.commit()
         return new_count
 
     async def get_warns(self, user_id: int, chat_id: int) -> int:
-        async with self.db.execute(
-            "SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT count FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             return row['count'] if row else 0
 
@@ -431,14 +346,10 @@ class Database:
         await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
         await self.db.commit()
 
-    async def get_all_warns_paginated(self, page: int = 0, per_page: int = 5,
-                                       chat_id: int = 0) -> Tuple[List[Dict], int]:
-        """Активные варны с пагинацией. chat_id=0 — все чаты."""
+    async def get_all_warns_paginated(self, page: int = 0, per_page: int = 5, chat_id: int = 0) -> Tuple[List[Dict], int]:
         offset = page * per_page
         if chat_id:
-            async with self.db.execute(
-                "SELECT COUNT(*) as cnt FROM warns WHERE chat_id = ? AND count > 0", (chat_id,)
-            ) as cur:
+            async with self.db.execute("SELECT COUNT(*) as cnt FROM warns WHERE chat_id = ? AND count > 0", (chat_id,)) as cur:
                 total = (await cur.fetchone())['cnt']
             async with self.db.execute(
                 "SELECT * FROM warns WHERE chat_id = ? AND count > 0 ORDER BY warned_at DESC LIMIT ? OFFSET ?",
@@ -449,15 +360,29 @@ class Database:
             async with self.db.execute("SELECT COUNT(*) as cnt FROM warns WHERE count > 0") as cur:
                 total = (await cur.fetchone())['cnt']
             async with self.db.execute(
-                "SELECT * FROM warns WHERE count > 0 ORDER BY warned_at DESC LIMIT ? OFFSET ?",
-                (per_page, offset)
+                "SELECT * FROM warns WHERE count > 0 ORDER BY warned_at DESC LIMIT ? OFFSET ?", (per_page, offset)
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
         return rows, total
 
-    # =========================================================================
-    # КЭШ ДЕЙСТВИЙ (причины, параметры)
-    # =========================================================================
+    # === НАКАЗАНИЯ ПОЛЬЗОВАТЕЛЯ (для /start) ===
+
+    async def get_user_all_punishments(self, user_id: int) -> Dict:
+        result = {"warns": [], "mutes": [], "bans": [], "global_ban": None}
+        async with self.db.execute("SELECT * FROM warns WHERE user_id = ? AND count > 0", (user_id,)) as cur:
+            result["warns"] = [dict(r) for r in await cur.fetchall()]
+        now = int(time.time())
+        async with self.db.execute("SELECT * FROM mutes WHERE user_id = ?", (user_id,)) as cur:
+            for r in await cur.fetchall():
+                d = dict(r)
+                if d['until'] == 0 or d['until'] > now:
+                    result["mutes"].append(d)
+        async with self.db.execute("SELECT * FROM bans WHERE user_id = ?", (user_id,)) as cur:
+            result["bans"] = [dict(r) for r in await cur.fetchall()]
+        result["global_ban"] = await self.get_global_ban_info(user_id)
+        return result
+
+    # === КЭШ ДЕЙСТВИЙ ===
 
     async def cache_action(self, key: str, data: str):
         await self.db.execute("""
@@ -480,9 +405,7 @@ class Database:
         await self.db.execute("DELETE FROM action_cache WHERE cached_at < ?", (cutoff,))
         await self.db.commit()
 
-    # =========================================================================
-    # НИКИ
-    # =========================================================================
+    # === НИКИ ===
 
     async def set_nick(self, user_id: int, chat_id: int, nick: str):
         await self.db.execute("""
@@ -492,22 +415,16 @@ class Database:
         await self.db.commit()
 
     async def get_nick(self, user_id: int, chat_id: int) -> Optional[str]:
-        async with self.db.execute(
-            "SELECT nick FROM nicks WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT nick FROM nicks WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
             row = await cur.fetchone()
             return row['nick'] if row else None
 
     async def get_user_by_nick(self, nick: str, chat_id: int) -> Optional[int]:
-        async with self.db.execute(
-            "SELECT user_id FROM nicks WHERE nick = ? COLLATE NOCASE AND chat_id = ?", (nick, chat_id)
-        ) as cur:
+        async with self.db.execute("SELECT user_id FROM nicks WHERE nick = ? COLLATE NOCASE AND chat_id = ?", (nick, chat_id)) as cur:
             row = await cur.fetchone()
             return row['user_id'] if row else None
 
-    # =========================================================================
-    # НАСТРОЙКИ ЧАТА
-    # =========================================================================
+    # === НАСТРОЙКИ ЧАТА ===
 
     async def get_welcome(self, chat_id: int) -> Optional[str]:
         async with self.db.execute("SELECT welcome_text FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
@@ -540,20 +457,12 @@ class Database:
         async with self.db.execute("SELECT word FROM banwords WHERE chat_id = ?", (chat_id,)) as cur:
             return [row['word'] for row in await cur.fetchall()]
 
-    # =========================================================================
-    # СПАМ (ANTIFLOOD)
-    # =========================================================================
+    # === СПАМ ===
 
     async def check_spam(self, user_id: int, chat_id: int, now: float, interval: int = 2) -> int:
         cutoff = now - interval
-        await self.db.execute(
-            "DELETE FROM messages WHERE user_id = ? AND chat_id = ? AND sent_at < ?",
-            (user_id, chat_id, int(cutoff))
-        )
-        await self.db.execute(
-            "INSERT INTO messages (user_id, chat_id, message_id, sent_at) VALUES (?, ?, 0, ?)",
-            (user_id, chat_id, int(now))
-        )
+        await self.db.execute("DELETE FROM messages WHERE user_id = ? AND chat_id = ? AND sent_at < ?", (user_id, chat_id, int(cutoff)))
+        await self.db.execute("INSERT INTO messages (user_id, chat_id, message_id, sent_at) VALUES (?, ?, 0, ?)", (user_id, chat_id, int(now)))
         async with self.db.execute(
             "SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND chat_id = ? AND sent_at >= ?",
             (user_id, chat_id, int(cutoff))
