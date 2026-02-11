@@ -342,6 +342,11 @@ class Database:
             row = await cur.fetchone()
             return row['count'] if row else 0
 
+    async def get_warn_info(self, user_id: int, chat_id: int) -> Optional[Dict]:
+        async with self.db.execute("SELECT * FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
     async def clear_warns(self, user_id: int, chat_id: int):
         await self.db.execute("DELETE FROM warns WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
         await self.db.commit()

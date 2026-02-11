@@ -316,6 +316,7 @@ async def log_action(action: str, target: int, caller: int,
         t_name = target_info['full_name']
         t_uname = f" (@{target_info['username']})" if target_info['username'] else ""
         c_name = caller_info['full_name']
+        c_uname = f" (@{caller_info['username']})" if caller_info['username'] else ""
 
         text = f"📋 <b>{action}</b>\n━━━━━━━━━━━━━━━━\n"
         text += f"👤 Кому: {t_name}{t_uname}\n🆔 ID: <code>{target}</code>\n"
@@ -324,7 +325,7 @@ async def log_action(action: str, target: int, caller: int,
             text += f"📅 Окончание: {end_date_str(duration)}\n"
         if reason:
             text += f"📝 Причина: {reason}\n"
-        text += f"👮 Модератор: {c_name}\n"
+        text += f"👮 Модератор: {c_name}{c_uname}\n"
         text += f"💬 Чат: {chat_title}\n"
         text += f"🕐 {now_str()}"
 
@@ -612,7 +613,8 @@ async def cmd_getban(message: Message):
     # Глобальный бан
     gb = await db.get_global_ban_info(target)
     if gb:
-        text += f"🌐 <b>Глобальный бан</b>\n  Дата: {fmt_ts(gb.get('banned_at', 0))}\n  Окончание: никогда\n  Причина: {gb.get('reason', '—')}\n\n"
+        gb_mod = await mention(gb.get('banned_by', 0))
+        text += f"🌐 <b>Глобальный бан</b>\n  Дата: {fmt_ts(gb.get('banned_at', 0))}\n  Окончание: никогда\n  Причина: {gb.get('reason', '—')}\n  👮 Модератор: {gb_mod}\n\n"
         found = True
 
     # Баны по чатам
@@ -626,7 +628,7 @@ async def cmd_getban(message: Message):
                 end = fmt_ts(until) if until > int(time.time()) else "истёк"
             else:
                 end = "навсегда"
-            text += f"🚫 <b>Бан</b> — {chat_title}\n  Дата: {fmt_ts(ban.get('banned_at', 0))}\n  Окончание: {end}\n  Причина: {ban.get('reason', '—')}\n\n"
+            text += f"🚫 <b>Бан</b> — {chat_title}\n  Дата: {fmt_ts(ban.get('banned_at', 0))}\n  Окончание: {end}\n  Причина: {ban.get('reason', '—')}\n  👮 Модератор: {await mention(ban.get('banned_by', 0))}\n\n"
             found = True
 
     if not found:
@@ -652,10 +654,11 @@ async def cmd_getwarn(message: Message):
 
     chat_ids = await db.get_all_chat_ids()
     for cid in chat_ids:
-        warns = await db.get_warns(target, cid)
-        if warns > 0:
+        wi = await db.get_warn_info(target, cid)
+        if wi and wi['count'] > 0:
             chat_title = await db.get_chat_title(cid)
-            text += f"⚠️ <b>{warns}/{MAX_WARNS}</b> — {chat_title}\n"
+            mod = await mention(wi.get('warned_by', 0))
+            text += f"⚠️ <b>{wi['count']}/{MAX_WARNS}</b> — {chat_title}\n  Причина: {wi.get('reason', '—')}\n  👮 Модератор: {mod}\n\n"
             found = True
 
     mute_info_list = []
@@ -665,7 +668,7 @@ async def cmd_getwarn(message: Message):
             chat_title = await db.get_chat_title(cid)
             until = mi.get('until', 0)
             end = fmt_ts(until) if until and until > int(time.time()) else ("навсегда" if not until else "истёк")
-            mute_info_list.append(f"🔇 <b>Мут</b> — {chat_title}\n  Окончание: {end}\n  Причина: {mi.get('reason', '—')}")
+            mute_info_list.append(f"🔇 <b>Мут</b> — {chat_title}\n  Окончание: {end}\n  Причина: {mi.get('reason', '—')}\n  👮 Модератор: {await mention(mi.get('muted_by', 0))}")
 
     if mute_info_list:
         text += "\n" + "\n".join(mute_info_list) + "\n"
@@ -932,11 +935,13 @@ async def cmd_gban(message: Message):
 
     if STAFF_CHAT_ID and GBAN_TOPIC_ID:
         try:
+            ci = await get_user_info(caller_id)
+            c_tag = f" (@{ci['username']})" if ci['username'] else ""
             await bot.send_message(STAFF_CHAT_ID,
                 f"🌐 <b>ГЛОБАЛЬНЫЙ БАН</b>\n━━━━━━━━━━━━━━━━\n"
                 f"👤 {name}\n🆔 <code>{target}</code>\n"
                 f"📅 Окончание: никогда\n"
-                f"📝 {reason}\n👮 {(await get_user_info(caller_id))['full_name']}\n"
+                f"📝 {reason}\n👮 {ci['full_name']}{c_tag}\n"
                 f"✅ В {ok} чатах\n🕐 {now_str()}",
                 parse_mode="HTML", message_thread_id=GBAN_TOPIC_ID)
         except Exception as e:
