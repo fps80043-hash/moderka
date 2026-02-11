@@ -1,5 +1,8 @@
 """
-Database module v7.0
+Database module v8.0
+— добавлены: quiet mode, nick removal, nick list, reg date tracking,
+  online tracking, pullinfo, allsetnick/allremnick, banwords CRUD,
+  filter/antiflood/welcometext toggles, silent punishment mode
 """
 
 import aiosqlite
@@ -21,6 +24,7 @@ class Database:
         await self.db.execute("PRAGMA journal_mode=WAL")
         await self.db.execute("PRAGMA busy_timeout=5000")
         await self._create_tables()
+        await self._migrate()
 
     async def close(self):
         if self.db:
@@ -36,6 +40,7 @@ class Database:
                 antiflood INTEGER DEFAULT 0,
                 filter INTEGER DEFAULT 0,
                 ro_mode INTEGER DEFAULT 0,
+                quiet_mode INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
             CREATE TABLE IF NOT EXISTS global_roles (
@@ -99,11 +104,27 @@ class Database:
                 key TEXT PRIMARY KEY, data TEXT,
                 cached_at INTEGER DEFAULT (strftime('%s', 'now'))
             );
+            CREATE TABLE IF NOT EXISTS user_reg (
+                user_id INTEGER, chat_id INTEGER,
+                reg_at INTEGER DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (user_id, chat_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_user_chat ON messages(user_id, chat_id);
             CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_at);
             CREATE INDEX IF NOT EXISTS idx_uname_cache_name ON username_cache(username);
         """)
         await self.db.commit()
+
+    async def _migrate(self):
+        """Миграция: добавляем новые колонки если их нет"""
+        try:
+            async with self.db.execute("PRAGMA table_info(chats)") as cur:
+                cols = [row[1] for row in await cur.fetchall()]
+            if 'quiet_mode' not in cols:
+                await self.db.execute("ALTER TABLE chats ADD COLUMN quiet_mode INTEGER DEFAULT 0")
+                await self.db.commit()
+        except Exception as e:
+            logger.warning(f"migrate: {e}")
 
     # === ЧАТЫ ===
 
@@ -122,6 +143,11 @@ class Database:
         async with self.db.execute("SELECT title FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
             row = await cur.fetchone()
             return row['title'] if row else str(chat_id)
+
+    async def get_chat_count(self) -> int:
+        async with self.db.execute("SELECT COUNT(*) as cnt FROM chats") as cur:
+            row = await cur.fetchone()
+            return row['cnt'] if row else 0
 
     # === USERNAME CACHE ===
 
@@ -195,6 +221,12 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
             return row['role'] if row else 0
+
+    async def remove_all_user_roles(self, user_id: int):
+        """Убрать роль пользователя из всех чатов (для /sremoverole)"""
+        await self.db.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
+        await self.db.execute("DELETE FROM global_roles WHERE user_id = ?", (user_id,))
+        await self.db.commit()
 
     # === ГЛОБАЛЬНЫЙ БАН ===
 
@@ -424,8 +456,42 @@ class Database:
             row = await cur.fetchone()
             return row['nick'] if row else None
 
+    async def remove_nick(self, user_id: int, chat_id: int):
+        await self.db.execute("DELETE FROM nicks WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        await self.db.commit()
+
+    async def remove_nick_all(self, user_id: int):
+        """Удалить ник пользователя из всех чатов"""
+        await self.db.execute("DELETE FROM nicks WHERE user_id = ?", (user_id,))
+        await self.db.commit()
+
+    async def set_nick_all(self, user_id: int, nick: str, chat_ids: List[int]):
+        """Установить ник пользователю во всех чатах"""
+        for cid in chat_ids:
+            await self.db.execute("""
+                INSERT INTO nicks (user_id, chat_id, nick) VALUES (?, ?, ?)
+                ON CONFLICT(user_id, chat_id) DO UPDATE SET nick = excluded.nick
+            """, (user_id, cid, nick))
+        await self.db.commit()
+
     async def get_user_by_nick(self, nick: str, chat_id: int) -> Optional[int]:
         async with self.db.execute("SELECT user_id FROM nicks WHERE nick = ? COLLATE NOCASE AND chat_id = ?", (nick, chat_id)) as cur:
+            row = await cur.fetchone()
+            return row['user_id'] if row else None
+
+    async def get_all_nicks(self, chat_id: int) -> List[Tuple[int, str]]:
+        """Список всех ников в чате"""
+        async with self.db.execute("SELECT user_id, nick FROM nicks WHERE chat_id = ? ORDER BY nick", (chat_id,)) as cur:
+            return [(row['user_id'], row['nick']) for row in await cur.fetchall()]
+
+    async def get_user_nicks_all_chats(self, user_id: int) -> List[Tuple[int, str]]:
+        """Все ники пользователя во всех чатах"""
+        async with self.db.execute("SELECT chat_id, nick FROM nicks WHERE user_id = ?", (user_id,)) as cur:
+            return [(row['chat_id'], row['nick']) for row in await cur.fetchall()]
+
+    async def get_user_by_nick_any_chat(self, nick: str) -> Optional[int]:
+        """Найти пользователя по нику в любом чате"""
+        async with self.db.execute("SELECT user_id FROM nicks WHERE nick = ? COLLATE NOCASE LIMIT 1", (nick,)) as cur:
             row = await cur.fetchone()
             return row['user_id'] if row else None
 
@@ -435,6 +501,10 @@ class Database:
         async with self.db.execute("SELECT welcome_text FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
             row = await cur.fetchone()
             return row['welcome_text'] if row and row['welcome_text'] else None
+
+    async def set_welcome(self, chat_id: int, text: str):
+        await self.db.execute("UPDATE chats SET welcome_text = ? WHERE chat_id = ?", (text, chat_id))
+        await self.db.commit()
 
     async def set_ro_mode(self, chat_id: int, enabled: bool):
         await self.db.execute("UPDATE chats SET ro_mode = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
@@ -448,19 +518,72 @@ class Database:
         except Exception:
             return False
 
+    async def set_quiet_mode(self, chat_id: int, enabled: bool):
+        await self.db.execute("UPDATE chats SET quiet_mode = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
+        await self.db.commit()
+
+    async def is_quiet_mode(self, chat_id: int) -> bool:
+        try:
+            async with self.db.execute("SELECT quiet_mode FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+                row = await cur.fetchone()
+                return bool(row['quiet_mode']) if row else False
+        except Exception:
+            return False
+
+    async def set_antiflood(self, chat_id: int, enabled: bool):
+        await self.db.execute("UPDATE chats SET antiflood = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
+        await self.db.commit()
+
     async def is_antiflood(self, chat_id: int) -> bool:
         async with self.db.execute("SELECT antiflood FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
             row = await cur.fetchone()
             return bool(row['antiflood']) if row else False
+
+    async def set_filter(self, chat_id: int, enabled: bool):
+        await self.db.execute("UPDATE chats SET filter = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
+        await self.db.commit()
 
     async def is_filter(self, chat_id: int) -> bool:
         async with self.db.execute("SELECT filter FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
             row = await cur.fetchone()
             return bool(row['filter']) if row else False
 
+    # === BANWORDS ===
+
     async def get_banwords(self, chat_id: int) -> List[str]:
         async with self.db.execute("SELECT word FROM banwords WHERE chat_id = ?", (chat_id,)) as cur:
             return [row['word'] for row in await cur.fetchall()]
+
+    async def add_banword(self, chat_id: int, word: str) -> bool:
+        try:
+            await self.db.execute("INSERT INTO banwords (chat_id, word) VALUES (?, ?)", (chat_id, word.lower()))
+            await self.db.commit()
+            return True
+        except Exception:
+            return False
+
+    async def remove_banword(self, chat_id: int, word: str) -> bool:
+        async with self.db.execute("SELECT 1 FROM banwords WHERE chat_id = ? AND word = ? COLLATE NOCASE", (chat_id, word)) as cur:
+            if not await cur.fetchone():
+                return False
+        await self.db.execute("DELETE FROM banwords WHERE chat_id = ? AND word = ? COLLATE NOCASE", (chat_id, word))
+        await self.db.commit()
+        return True
+
+    # === РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЕЙ ===
+
+    async def register_user(self, user_id: int, chat_id: int):
+        await self.db.execute("INSERT OR IGNORE INTO user_reg (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id))
+        await self.db.commit()
+
+    async def get_user_reg(self, user_id: int, chat_id: int) -> Optional[int]:
+        async with self.db.execute("SELECT reg_at FROM user_reg WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)) as cur:
+            row = await cur.fetchone()
+            return row['reg_at'] if row else None
+
+    async def get_user_reg_all(self, user_id: int) -> List[Tuple[int, int]]:
+        async with self.db.execute("SELECT chat_id, reg_at FROM user_reg WHERE user_id = ?", (user_id,)) as cur:
+            return [(row['chat_id'], row['reg_at']) for row in await cur.fetchall()]
 
     # === СПАМ ===
 
