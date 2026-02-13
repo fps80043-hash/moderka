@@ -33,6 +33,7 @@ STAFF_CHAT_ID: int = config.get("staff_chat_id", 0)
 LOG_TOPIC_ID: int = config.get("log_topic_id", 0)
 GBAN_TOPIC_ID: int = config.get("gban_topic_id", 0)
 PUNISH_TOPIC_ID: int = config.get("punish_topic_id", 0)
+REPORT_TOPIC_ID: int = config.get("report_topic_id", 558)
 SUPPORT_LINK: str = config.get("support_link", "")
 PRESET_STAFF: dict = config.get("preset_staff", {})
 MAX_WARNS: int = config.get("max_warns", 3)
@@ -424,17 +425,62 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     role = await caller_role(message)
     text = f"📖 <b>Команды модерации</b>\nРоль: <b>{ROLE_NAMES.get(role,'?')} ({role})</b>\n\n"
-    text += "<b>[0] Пользователь:</b>\n/stats /staff /report /top\n\n"
+
+    text += "<b>[0] Пользователь:</b>\n"
+    text += "/stats - статистика\n"
+    text += "/staff - список модераторов\n"
+    text += "/report - репорт\n"
+    text += "/top - топ по сообщениям\n\n"
+
     if role >= 1:
-        text += "<b>[1-2] Модератор:</b>\n/warn /mute /kick /unwarn /unmute\n/getwarn /warnlist /rep\n\n"
+        text += "<b>[1-2] Младший модератор - Модератор:</b>\n"
+        text += "/warn - выдать варн\n"
+        text += "/mute - блокировка чата\n"
+        text += "/kick - кикнуть с группы\n"
+        text += "/unwarn - снять варн\n"
+        text += "/unmute - снять мут\n"
+        text += "/getwarn - проверить на варн\n"
+        text += "/warnlist - список предупреждений\n"
+        text += "/rep - принять репорт\n\n"
+
     if role >= 3:
-        text += "<b>[3] Старший модератор:</b>\n/reg\n\n"
+        text += "<b>[3] Старший модератор:</b>\n"
+        text += "/reg - дата регистрации в группе\n\n"
+
     if role >= 4:
-        text += "<b>[4] Куратор модерации:</b>\n/banlist /ro /unro /quiet\n/setnick /removenick /getnick /nlist\n/online /onlinelist\n\n"
+        text += "<b>[4] Куратор модерации:</b>\n"
+        text += "/banlist - список заблокированных\n"
+        text += "/ro\n/unro\n"
+        text += "/setnick - выдать ник\n"
+        text += "/removenick - убрать ник\n"
+        text += "/getnick - найти по нику\n"
+        text += "/nlist - список ников\n"
+        text += "/online - модераторы онлайн\n"
+        text += "/onlinelist - модераторы онлайн\n\n"
+
     if role >= 5:
-        text += "<b>[5-6] Тех. специалист:</b>\n/getacc /getban /ban [--silent] /unban\n/banwords /filter /antiflood /welcometext\n/clear\n\n"
+        text += "<b>[5-6] Технический специалист - Гл. Тех. Специалист:</b>\n"
+        text += "/getacc - проверить аккаунт\n"
+        text += "/reg - дата регистрации в группе\n"
+        text += "/getban - проверить на блокировку\n"
+        text += "/ban [--silent] - забанить пользователя\n"
+        text += "/unban - разбанить пользователя\n"
+        text += "/banwords\n"
+        text += "/filter - фильтр слов\n"
+        text += "/antiflood - антифлуд\n"
+        text += "/welcometext - текст при заходе в группу\n"
+        text += "/clear - очистить сообщения\n\n"
+
     if role >= 7:
-        text += "<b>[7-10] Куратор+:</b>\n/gban /ungban /setrole /removerole /sremoverole\n/allsetnick /allremnick /pullinfo\n\n"
+        text += "<b>[7-10] Куратор групп, Зам. главного модератора, Главный модератор, Владелец:</b>\n"
+        text += "/gban - блокировка во всех чатах\n"
+        text += "/ungban - снятие блокировки во всех чатах\n"
+        text += "/setrole - выдать роль пользователю\n"
+        text += "/removerole - снять роль пользователю\n"
+        text += "/sremoverole - снять роль везде\n"
+        text += "/allsetnick - поставить ник везде\n"
+        text += "/allremnick - убрать ник везде\n\n"
+
     text += "💡 <code>--silent</code> — тихое наказание"
     await message.answer(text, parse_mode="HTML")
 
@@ -528,15 +574,15 @@ async def cmd_report(message: Message):
     report_id = await db.create_report(message.from_user.id, message.chat.id, reply_msg_id, thread_id, reason)
     reporter = await mention(message.from_user.id)
     chat_title = await db.get_chat_title(message.chat.id)
-    # Отправляем в стафф-чат
-    if STAFF_CHAT_ID and LOG_TOPIC_ID:
+    # Отправляем в стафф-чат → топик репортов
+    if STAFF_CHAT_ID and REPORT_TOPIC_ID:
         kb = InlineKeyboardBuilder()
         kb.button(text="✅ Принять", callback_data=f"rep_accept:{report_id}")
         try:
             rep_text = f"🚨 <b>Репорт #{report_id}</b>\n\n👤 От: {reporter}\n💬 Чат: {chat_title}\n"
             if reason: rep_text += f"📝 Причина: {reason}\n"
             rep_text += f"\n/rep {report_id} — принять"
-            await bot.send_message(STAFF_CHAT_ID, rep_text, parse_mode="HTML", message_thread_id=LOG_TOPIC_ID, reply_markup=kb.as_markup())
+            await bot.send_message(STAFF_CHAT_ID, rep_text, parse_mode="HTML", message_thread_id=REPORT_TOPIC_ID, reply_markup=kb.as_markup())
         except Exception as e:
             logger.error(f"report send: {e}")
     await message.reply("✅ Репорт отправлен модераторам!")
@@ -1356,7 +1402,35 @@ async def on_user_join(event: ChatMemberUpdated):
     welcome = await db.get_welcome(cid)
     if welcome:
         name = event.new_chat_member.user.full_name or ""
-        await bot.send_message(cid, welcome.replace("{user}", name))
+        try:
+            await bot.send_message(cid, welcome.replace("{user}", name))
+        except Exception as e:
+            logger.error(f"welcome (chat_member): {e}")
+
+@router.message(F.new_chat_members)
+async def on_new_chat_members(message: Message):
+    """Fallback: обработка new_chat_members (когда chat_member update не приходит)"""
+    if not message.new_chat_members: return
+    cid = message.chat.id
+    for member in message.new_chat_members:
+        if member.is_bot: continue
+        uid = member.id
+        if member.username:
+            await db.cache_username(uid, member.username)
+        await db.register_user(uid, cid)
+        if await db.is_globally_banned(uid):
+            try:
+                await bot.ban_chat_member(cid, uid)
+                await bot.send_message(cid, f"🚫 {await mention(uid)} — глоб. бан!", parse_mode="HTML")
+            except Exception: pass
+            continue
+        welcome = await db.get_welcome(cid)
+        if welcome:
+            name = member.full_name or ""
+            try:
+                await bot.send_message(cid, welcome.replace("{user}", name))
+            except Exception as e:
+                logger.error(f"welcome (new_chat_members): {e}")
 
 @router.message(F.text)
 async def on_message(message: Message):
@@ -1482,7 +1556,7 @@ async def main():
     asyncio.create_task(periodic_cleanup())
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Запущен!")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
 
 if __name__ == "__main__":
     asyncio.run(main())

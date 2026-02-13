@@ -18,5 +18,6 @@
   "spam_interval_seconds": 2,
   "spam_messages_count": 3,
   "anon_admin_role": 10,
-  "punish_topic_id": 0
+  "punish_topic_id": 0,
+  "report_topic_id": 558
 }
