@@ -143,12 +143,27 @@ def users_list_kb(users: list, page: int, total: int):
 
 
 def chats_list_kb(chats: list):
+    """Создает клавиатуру со списком всех чатов."""
     rows = []
     for c in chats:
-        title = c.get("title", "") or str(c["chat_id"])
-        rows.append([InlineKeyboardButton(f"💬 {title}", callback_data=f"chat:{c['chat_id']}")])
+        # Формируем название чата с ID для удобства
+        chat_id = c.get("chat_id", 0)
+        title = c.get("title", "")
+        
+        # Если нет названия, используем ID
+        if not title:
+            title = f"Чат {chat_id}"
+        
+        # Добавляем кнопку для каждого чата
+        rows.append([InlineKeyboardButton(
+            f"💬 {title}", 
+            callback_data=f"chat:{chat_id}"
+        )])
+    
+    # Кнопка для управления всеми чатами сразу (если чатов больше одного)
     if len(chats) > 1:
         rows.append([InlineKeyboardButton("📢 Все чаты сразу", callback_data="chat:all")])
+    
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:moderation")])
     return InlineKeyboardMarkup(rows)
 

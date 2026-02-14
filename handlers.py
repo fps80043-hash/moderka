@@ -93,6 +93,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📋 <b>Главное меню</b>",
             reply_markup=main_menu_kb(role), parse_mode=ParseMode.HTML)
     else:
+        # При интерфейсе команд показываем список команд
         await _send_commands_help(update.message, role)
 
 
@@ -109,40 +110,36 @@ async def cb_set_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Интерфейс: <b>Кнопки</b>\n\n📋 <b>Главное меню</b>",
             reply_markup=main_menu_kb(role), parse_mode=ParseMode.HTML)
     else:
-        # Сразу показываем список команд, без лишнего "нажми /start".
-        text = "✅ Интерфейс: <b>Команды</b>\n\n" + "\n".join([
-            "📋 <b>Доступные команды:</b>",
-            "/start — Главное меню",
-            "/profile — Профиль",
-            "/top — Топ по сообщениям",
-            "/report — Репорт",
-            "/settings — Настройки",
-            "",
-        ])
+        # Сразу показываем список команд при выборе интерфейса "Команды"
+        text = "✅ Интерфейс: <b>Команды</b>\n\n"
+        text += "📋 <b>Доступные команды:</b>\n\n"
+        text += "/start — Главное меню\n"
+        text += "/profile — Профиль\n"
+        text += "/top — Топ по сообщениям\n"
+        text += "/report — Репорт\n"
+        text += "/settings — Настройки\n"
+        
         if can_moderate(role):
-            text += "\n" + "\n".join([
-                "🛡 <b>Модерация:</b>",
-                "/ban &lt;user&gt; &lt;время&gt; [причина]",
-                "/unban &lt;user&gt;",
-                "/editban &lt;user&gt; &lt;время&gt;",
-                "/globalban &lt;user&gt; [причина]",
-                "/warn &lt;user&gt; [причина]",
-                "/unwarn &lt;user&gt;",
-                "/mute &lt;user&gt; &lt;время&gt; [причина]",
-                "/unmute &lt;user&gt;",
-                "/editmute &lt;user&gt; &lt;время&gt;",
-                "/users /find /online /staff",
-                "/reports /chatmod",
-                "",
-            ])
+            text += "\n🛡 <b>Модерация:</b>\n"
+            text += "/ban &lt;user&gt; &lt;время&gt; [причина]\n"
+            text += "/unban &lt;user&gt;\n"
+            text += "/editban &lt;user&gt; &lt;время&gt;\n"
+            text += "/globalban &lt;user&gt; [причина]\n"
+            text += "/warn &lt;user&gt; [причина]\n"
+            text += "/unwarn &lt;user&gt;\n"
+            text += "/mute &lt;user&gt; &lt;время&gt; [причина]\n"
+            text += "/unmute &lt;user&gt;\n"
+            text += "/editmute &lt;user&gt; &lt;время&gt;\n"
+            text += "/users /find /online /staff\n"
+            text += "/reports /chatmod\n"
+        
         if can_admin(role):
-            text += "\n" + "\n".join([
-                "👑 <b>Админ:</b>",
-                "/setrole &lt;user&gt; &lt;уровень&gt;",
-                "",
-            ])
+            text += "\n👑 <b>Админ:</b>\n"
+            text += "/setrole &lt;user&gt; &lt;уровень&gt;\n"
+        
         if SUPPORT_LINK:
             text += f"\n💬 <a href='{SUPPORT_LINK}'>Поддержка</a>"
+        
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
@@ -196,21 +193,29 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("👥 <b>Пользователи</b>",
                                   reply_markup=users_menu_kb(), parse_mode=ParseMode.HTML)
     elif section == "chats" and can_moderate(role):
-        # На всякий случай гарантируем, что чаты из config.json есть в БД.
-        # (Если меняли config.json и БД уже существовала)
+        # Гарантируем, что все чаты из config.json зарегистрированы в БД
         from config import MODERATED_CHATS
         for cid in MODERATED_CHATS:
             try:
                 await db.ensure_chat(int(cid))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to ensure chat {cid}: {e}")
+        
+        # Получаем все чаты из БД
         chats = await db.get_all_chats()
+        
         if not chats:
-            await q.edit_message_text("Нет чатов. Добавь бота в группу.",
-                                      reply_markup=back_to_main_kb())
+            await q.edit_message_text(
+                "❌ Нет чатов в базе данных.\n\n"
+                "Добавь бота в группы или проверь config.json.",
+                reply_markup=back_to_main_kb())
         else:
-            await q.edit_message_text("💬 <b>Выбери чат:</b>",
-                                      reply_markup=chats_list_kb(chats), parse_mode=ParseMode.HTML)
+            # Показываем список чатов
+            await q.edit_message_text(
+                f"💬 <b>Выбери чат:</b>\n\n"
+                f"Всего чатов: {len(chats)}",
+                reply_markup=chats_list_kb(chats), 
+                parse_mode=ParseMode.HTML)
     elif section == "reports" and can_moderate(role):
         reports = await db.get_open_reports(10)
         if not reports:

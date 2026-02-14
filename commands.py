@@ -482,13 +482,35 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def private_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений в ЛС (не команд)."""
     if not update.message or update.effective_chat.type != "private":
         return
+    
     user = update.effective_user
     await db.ensure_user(user.id, user.username or "", user.first_name or "")
     iface = await db.get_interface(user.id)
+    
+    # Если интерфейс не выбран - предлагаем выбрать
     if not iface:
         from keyboards import interface_choice_kb
-        await update.message.reply_text("Выбери интерфейс:", reply_markup=interface_choice_kb())
+        await update.message.reply_text(
+            "👋 Добро пожаловать!\n\nВыбери удобный интерфейс управления:",
+            reply_markup=interface_choice_kb(),
+            parse_mode=ParseMode.HTML)
         return
-    await update.message.reply_text("Используй /start")
+    
+    role = await db.get_role(user.id)
+    
+    # Если выбран интерфейс кнопок - показываем главное меню
+    if iface == INTERFACE_BUTTONS:
+        from keyboards import main_menu_kb
+        await update.message.reply_text(
+            "📋 <b>Главное меню</b>\n\n"
+            "Используй кнопки ниже для навигации:",
+            reply_markup=main_menu_kb(role),
+            parse_mode=ParseMode.HTML)
+    else:
+        # Если выбран интерфейс команд - предлагаем использовать /start
+        await update.message.reply_text(
+            "Используй команды для работы с ботом.\n"
+            "Введи /start чтобы увидеть список доступных команд.")

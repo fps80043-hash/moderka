@@ -33,13 +33,17 @@ def _guard_private_commands(func):
 
     async def wrapper(update, context):
         try:
+            # Проверяем, что это приватный чат
             if update.effective_chat and update.effective_chat.type == "private":
+                # /start всегда работает
                 text = (update.message.text or "") if update.message else ""
                 if text.startswith("/start"):
                     return await func(update, context)
 
+                # Проверяем интерфейс пользователя
                 iface = await db.get_interface(update.effective_user.id)
                 if iface == INTERFACE_BUTTONS:
+                    # Если выбран интерфейс кнопок - команды блокируются
                     role = await db.get_role(update.effective_user.id)
                     await update.message.reply_text(
                         "🖲 У тебя выбран интерфейс <b>Кнопки</b>.\n\n"
